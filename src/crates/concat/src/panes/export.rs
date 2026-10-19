@@ -137,8 +137,9 @@ impl ExportPane {
             ExportMsg::RateChanged(index) => {
                 self.rate = (index.max(0) as usize).min(Self::rates(studio).len() - 1);
             }
-            // A codec this device cannot encode is not taken: the picker
-            // says so under it, and the choice before stands.
+            // A codec this device cannot encode is not taken: its row is
+            // greyed in the picker, so this is the last guard on the path,
+            // not the user-facing way it is refused.
             ExportMsg::CodecChanged(index) => {
                 let index = (index.max(0) as usize).min(concat_media::VideoCodec::ALL.len() - 1);
                 if concat_media::VideoCodec::ALL[index].encodable() {

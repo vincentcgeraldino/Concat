@@ -32,12 +32,12 @@ pub struct Preferences {
     /// The playhead's colour as "#rrggbb", when one was picked by hand in
     /// Settings > Appearance. `None` is the palette's own, which is lime.
     pub playhead: Option<String>,
-    /// The interface scale, as a percent from [`UI_SCALES`]: the window and
-    /// everything in it are drawn this much larger than the display's own
-    /// scale says. `None` - or a value the list no longer has - follows the
-    /// display. Settings > Appearance picks it, and it is remembered here
-    /// for the window a launch makes; the window that is open is rescaled in
-    /// place the moment the choice is made.
+    /// The interface scale, as a percent from [`UI_SCALES`]: a multiplier
+    /// on the display's own scale, so 100% is "as the platform hands it"
+    /// rather than a flat 1.0. `None` - or a value the list no longer has -
+    /// follows the display. Settings > Appearance picks it, and it is
+    /// remembered here for the window a launch makes; the window that is
+    /// open is rescaled in place the moment the choice is made.
     /// https://github.com/jub0t/Concat/issues/320
     pub ui_scale: Option<u32>,
     /// The chosen transcriber model id, e.g. "base.en".
@@ -151,9 +151,22 @@ impl Preferences {
     }
 
     /// The multiplier the window backend takes for a percent: the percent
-    /// over a hundred, which is what `SLINT_SCALE_FACTOR` parses.
+    /// over a hundred, which is what `SLINT_SCALE_FACTOR` parses. Relative
+    /// to the display's own scale; the value to hand the backend is
+    /// [`Preferences::scale_with_display`].
     pub fn scale_factor(percent: u32) -> f64 {
         f64::from(percent) / 100.0
+    }
+
+    /// The scale the window backend takes, given the display's own scale
+    /// and the chosen percent: the two multiplied, so 100% means "as the
+    /// platform hands it" and every other step is relative to the display
+    /// rather than a flat absolute. 100% on a 1.25x laptop keeps 1.25x
+    /// instead of shrinking the interface to 1.0. Whole and pure, so both
+    /// call sites - the launch and the in-place rescale - cannot drift
+    /// from the test that pins the arithmetic.
+    pub fn scale_with_display(display: f64, percent: u32) -> f64 {
+        display * Self::scale_factor(percent)
     }
 }
 
@@ -348,6 +361,19 @@ mod tests {
         assert_eq!(Preferences::scale_factor(110), 1.1);
         assert_eq!(Preferences::scale_factor(150), 1.5);
         assert_eq!(Preferences::scale_factor(200), 2.0);
+    }
+
+    /// The interface scale multiplies the display's own rather than
+    /// replacing it: 100% keeps a 1.25x laptop at 1.25x, where it once
+    /// shrank the interface to a flat 1.0.
+    #[test]
+    fn the_interface_scale_multiplies_the_display() {
+        let close = |got: f64, want: f64| (got - want).abs() < 1e-12;
+        assert!(close(Preferences::scale_with_display(1.0, 100), 1.0));
+        assert!(close(Preferences::scale_with_display(1.25, 100), 1.25));
+        assert!(close(Preferences::scale_with_display(1.25, 150), 1.875));
+        assert!(close(Preferences::scale_with_display(2.0, 110), 2.2));
+        assert!(close(Preferences::scale_with_display(1.0, 200), 2.0));
     }
 
     /// A scale is written as its percent and read back, and a file from

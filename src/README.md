@@ -54,10 +54,13 @@ cargo build --profile app -p concat    # the shipping binary: fat LTO, panic=abo
 
 Nothing is spawned at run time: FFmpeg is linked, whisper.cpp and sherpa-onnx
 are compiled in. A build needs the FFmpeg 7+ development libraries (headers
-and import libraries) - `brew install ffmpeg` on macOS, a BtbN `shared` build
-unpacked and pointed at with `FFMPEG_DIR` on Windows and on Linux
-distributions whose packaged FFmpeg is older than 7 - plus cmake and a C++
-toolchain for whisper.cpp. The window draws with Slint's Skia renderer on
+and import libraries) - `brew install ffmpeg` on macOS; on Windows,
+`scripts/bootstrap-windows.ps1` fetches a BtbN 9.0 `shared` build into
+`%LOCALAPPDATA%\concat\ffmpeg-dev`, points `FFMPEG_DIR` at it and runs the
+check; on Linux distributions whose packaged FFmpeg is older than 7, a BtbN
+`shared` build unpacked and pointed at with `FFMPEG_DIR` - plus cmake and a
+C++ toolchain for whisper.cpp, and libclang (LLVM) for the bindings the
+FFmpeg crate generates at build time. The window draws with Slint's Skia renderer on
 every platform, from prebuilt Skia binaries fetched at build time.
 On Linux, Skia needs the fontconfig and freetype headers at build time (see
 `.github/workflows/build-app.yml` for the package list).

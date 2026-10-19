@@ -523,11 +523,14 @@ pub(crate) fn transitions_at(shapes: &[TransitionShape], frame: i64) -> Vec<Tran
 /// for the compositor to combine over; every other kind needs nothing more
 /// than what it already baked into the clips themselves.
 ///
-/// Track indices are doubled first, so an incoming clip gets an odd lane of
-/// its own directly above the pair it crosses over - stacking against every
-/// other track is preserved, and nothing else occupies odd lanes. Cuts are
-/// collected before anything mutates, so resolving one transition cannot
-/// unhook the adjacency test of the next.
+/// Track indices are doubled first, so an incoming clip gets the odd lane
+/// above its own track. Stacking against every other track is preserved,
+/// and nothing else occupies odd lanes. The lane comes from the outgoing
+/// clip's *original* track, not from wherever a previous transition in a
+/// chain left it, so a run of transitions cannot climb into the next
+/// track's lane and hide it. Cuts are collected before anything mutates,
+/// so resolving one transition cannot unhook the adjacency test of the
+/// next.
 ///
 /// Every kind but the fades to a colour is built on one overlap, centred on
 /// the cut the way the timeline draws it: the incoming clip extends
@@ -758,7 +761,7 @@ struct Cut {
 
 /// What [`overlap`] built a transition on.
 struct Overlap {
-    /// The incoming clip, moved to the lane above the outgoing one and
+    /// The incoming clip, moved to its own track's transition lane and
     /// starting where the overlap does.
     incoming: usize,
     /// The overlap's length: the transition's, capped by both clips.
@@ -770,10 +773,10 @@ struct Overlap {
 }
 
 /// The overlap a transition crosses, centred on the cut the way the
-/// timeline draws it: the incoming clip on the lane above, from half the
-/// transition's length before the cut, over the outgoing one running on
-/// for the other half past it. The length is capped by both clips; `None`
-/// for a cut too short to overlap at all.
+/// timeline draws it: the incoming clip on its track's lane above the
+/// pair, from half the transition's length before the cut, over the
+/// outgoing one running on for the other half past it. The length is
+/// capped by both clips; `None` for a cut too short to overlap at all.
 ///
 /// Each side is the clip itself, extended with its source clock moved the
 /// same way, into footage the edit left out: before the incoming clip's
@@ -803,7 +806,14 @@ fn overlap(clips: &mut Vec<ExportClip>, cut: &Cut, frame: f64) -> Option<Overlap
         lead = 0.0;
     }
     let tail = length - lead;
-    let a_track = a.track;
+    // The lane the pair belongs to: the outgoing clip's *original* track,
+    // recovered from any odd lane an earlier transition in a chain raised
+    // it to. Reading the lane as it stands would put each later incoming
+    // clip one lane higher again - the third clip in A-B-C lands on track
+    // two's lane and hides whatever lives there for its whole length (N2).
+    // Every raised clip on track t shares the one odd lane 2t+1 above its
+    // track.
+    let a_track = a.track & !1;
     let a_end = a.start + a.duration;
     let outgoing_runs = tail_handle(a, frame) + frame / 2.0 >= tail;
 
@@ -1130,7 +1140,8 @@ pub fn render_on(
             reporter.cancelled()?;
             reporter.emit(0, total_frames, "mixing audio");
             let mix: Vec<AudioClip> = sound.iter().flat_map(|clip| audio_pieces(clip)).collect();
-            audio::mix_to_file(&mix, timeline_end, &mixed).map_err(|error| error.to_string())?;
+            audio::mix_to_file(&mix, timeline_end, &mixed, Some(reporter.cancel))
+                .map_err(|error| error.to_string())?;
 
             reporter.cancelled()?;
             reporter.emit(total_frames, total_frames, "muxing");
@@ -2966,6 +2977,44 @@ mod tests {
         assert_eq!(a.fade_out, 1.0, "and its sound fades out across it");
         assert_eq!(a.track, 0, "outgoing stays on its doubled lane");
         assert_eq!(clips.len(), 2, "no hold: both sides have footage");
+    }
+
+    /// A run of transitions keeps every incoming clip on its own track's
+    /// odd lane. Reading the outgoing clip's lane as it stood - rather
+    /// than the track it belongs to - sent the third clip of A-B-C to
+    /// track two's lane, where it hid whatever lived on the track above
+    /// for its whole length. A slideshow of cross-fades with captions on
+    /// the track above was the everyday case (N2).
+    #[test]
+    fn a_chain_of_transitions_stays_on_its_own_tracks_lane() {
+        let mut clips = vec![
+            clip("video", 0, 0.0, 4.0, 0.0),
+            clip("video", 0, 4.0, 4.0, 2.0),
+            clip("video", 0, 8.0, 4.0, 2.0),
+            // A caption living on the track above the slideshow.
+            clip("video", 1, 0.0, 12.0, 0.0),
+        ];
+        for one in &mut clips {
+            one.media_duration = Some(40.0);
+        }
+        clips[1].transition = spec("cross-fade", 1.0);
+        clips[2].transition = spec("cross-fade", 1.0);
+        resolve_transitions(&mut clips, FrameRate::THIRTY);
+
+        assert_eq!(clips[1].track, 1, "the first incoming clip's own odd lane");
+        assert_eq!(
+            clips[2].track, 1,
+            "the chained clip stays under the next track instead of climbing into it"
+        );
+        assert_eq!(
+            clips[3].track, 2,
+            "the track above keeps its own lane - the caption is not hidden"
+        );
+        assert_eq!(
+            (clips[2].start, clips[2].duration),
+            (7.5, 4.5),
+            "and the chained transition still centres on its cut"
+        );
     }
 
     /// A clip lengthened for a transition keeps its keys at the instants

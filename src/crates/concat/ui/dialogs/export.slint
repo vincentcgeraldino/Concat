@@ -326,6 +326,14 @@ component OutputSection inherits DialogSection {
         Select {
             current: root.data.codec;
             options: ["H.264", "HEVC", "AV1"];
+            // A standard this device has no encoder for is shown, greyed and
+            // unclickable: the trigger can never read a codec the file will
+            // not be.
+            disabled: [
+                !root.data.h264-encodable,
+                !root.data.hevc-encodable,
+                !root.data.av1-encodable,
+            ];
             details: [
                 root.data.h264-encodable ? I18n.t("export.playsEverywhere") : I18n.t("export.notOnThisDevice"),
                 root.data.hevc-encodable ? I18n.t("export.halfTheSize") : I18n.t("export.notOnThisDevice"),
@@ -340,6 +348,7 @@ component OutputSection inherits DialogSection {
         Select {
             current: root.data.codec - 1;
             options: ["HEVC", "AV1"];
+            disabled: [!root.data.hevc-encodable, !root.data.av1-encodable];
             details: [
                 root.data.hevc-encodable ? I18n.t("export.halfTheSize") : I18n.t("export.notOnThisDevice"),
                 root.data.av1-encodable ? I18n.t("export.smallest") : I18n.t("export.notOnThisDevice"),

@@ -184,6 +184,7 @@ fn sound(request: &ReverseRequest) -> Result<(), String> {
         &[span_clip(request, "areverse")],
         request.duration,
         &partial,
+        None,
     )
     .map_err(|error| error.to_string());
     land(&partial, &request.target, written)
@@ -304,6 +305,7 @@ fn footage(
         &[span_clip(request, "areverse")],
         request.duration,
         &partial_audio,
+        None,
     )
     .and_then(|()| mux(&partial_video, &partial_audio, &partial_muxed))
     .map_err(|error| error.to_string());

@@ -5985,7 +5985,7 @@ impl Studio {
             move || -> Result<concat_host::media::MediaSummary, String> {
                 std::fs::create_dir_all(&out_dir)
                     .map_err(|error| format!("could not create {}: {error}", out_dir.display()))?;
-                concat_media::audio::mix_to_file(&pieces, duration, &file)
+                concat_media::audio::mix_to_file(&pieces, duration, &file, None)
                     .map_err(|error| error.to_string())?;
                 concat_host::media::probe(&file.to_string_lossy())
             },
@@ -6782,11 +6782,13 @@ impl Studio {
         }
     }
 
-    /// A copy of `source` laid after it. Three commands, because a clip's
-    /// in-point and length are set by trims, not by placement.
-    /// Duplicate every unlocked selected clip (right-to-left by start so
-    /// neighbours do not stack). Falls back to the menu target when the
-    /// selection is empty.
+    /// Duplicates every unlocked selected clip (right-to-left by start so
+    /// neighbours do not stack), each copy laid right after its original.
+    /// Falls back to the menu target when the selection is empty.
+    ///
+    /// The lot is one undo step: laying a copy is several commands - the
+    /// placement, then the trims that give it its in-point and length - and
+    /// the gesture named here folds them together.
     pub fn duplicate_selected(&mut self) {
         let mut sources: Vec<Clip> = self
             .selection
@@ -6808,22 +6810,21 @@ impl Studio {
             return;
         }
         sources.sort_by(|left, right| right.start.total_cmp(&left.start));
+        self.flush_commit();
         let mut last = None;
         for source in &sources {
-            self.duplicate(source);
-            last = self.selection.first().cloned();
+            let end = source.start + source.duration;
+            let track_id = source.track_id.clone();
+            if let Some(created) = self.place_copy(source, &track_id, end, Some("duplicate")) {
+                last = Some(created);
+            }
+        }
+        // One step for the lot, and the next duplicate a step of its own.
+        if let Some(session) = self.session.as_mut() {
+            session.end_gesture();
         }
         if let Some(id) = last {
             self.selection = vec![id];
-        }
-    }
-
-    /// A copy of `source` laid right after it on its own lane, selected.
-    pub fn duplicate(&mut self, source: &Clip) {
-        let end = source.start + source.duration;
-        let track_id = source.track_id.clone();
-        if let Some(created) = self.place_copy(source, &track_id, end, None) {
-            self.selection = vec![created];
         }
     }
 

@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use concat_host::consolidate::Consolidation;
-use concat_project::consolidation_clips;
+use concat_project::model::{Clip, Timeline};
+use concat_project::{consolidation_clips, why_not_merge};
 
 use super::*;
 
@@ -77,6 +78,22 @@ impl Studio {
         if let Some(reason) = self.merge_blocked() {
             self.notify(&reason, true);
             return;
+        }
+        // Pieces of one file that still touch and carry nothing a rejoin
+        // would bend go back together without a render: nothing to encode,
+        // nothing lost (audit M5 - a fresh split's halves are the everyday
+        // case). Everything else consolidates through a rendered file below.
+        if why_not_merge(self.timeline(), &self.selection).is_none()
+            && rejoin_is_faithful(self.timeline(), &self.selection)
+        {
+            let ids = self.selection.clone();
+            if let Some(id) = self.apply(Command::MergeClips { clip_ids: ids }) {
+                self.selection = vec![id];
+                self.transition_selected = None;
+                self.request_preview();
+                self.notify(&t("studio.mergeFinished"), false);
+                return;
+            }
         }
         let Some(session) = self.session.as_ref() else {
             return;
@@ -181,9 +198,61 @@ impl Studio {
     }
 }
 
+/// Whether re-joining these clips is faithful as well as lossless: they
+/// must be pieces of one clip cut into windows - every setting alike on
+/// every piece, with only what a split leaves different and a merge puts
+/// back: the spans, the keyframe tracks (which absorb), the first piece's
+/// fade-in and incoming transition, and the last piece's fade-out. A piece
+/// carrying its own gain, effect, mid-way fade or transition would be bent
+/// by the rejoin, so those selections render instead (audit M5).
+fn rejoin_is_faithful(timeline: &Timeline, clip_ids: &[String]) -> bool {
+    let mut pieces: Vec<&Clip> = clip_ids.iter().filter_map(|id| timeline.clip(id)).collect();
+    pieces.sort_by(|left, right| left.start.total_cmp(&right.start));
+    let Some((first, rest)) = pieces.split_first() else {
+        return false;
+    };
+    // What the merge itself rewrites is blanked out of both sides of the
+    // comparison; everything else must match the first piece.
+    let unmoved = |clip: &Clip| {
+        let mut clip = clip.clone();
+        clip.id = String::new();
+        clip.name = String::new();
+        clip.start = 0.0;
+        clip.duration = 0.0;
+        clip.source_start = 0.0;
+        clip.keys = Vec::new();
+        clip.fade_in = 0.0;
+        clip.fade_out = 0.0;
+        clip.transition_in = None;
+        clip
+    };
+    // The head's own fade-out and the last piece's fade-in are replaced by
+    // the other end's, so they must be nothing to begin with.
+    if first.fade_out != 0.0 {
+        return false;
+    }
+    let head = unmoved(first);
+    for (index, piece) in rest.iter().enumerate() {
+        let last = index + 1 == rest.len();
+        if piece.fade_in != 0.0 || (!last && piece.fade_out != 0.0) {
+            return false;
+        }
+        if piece.transition_in.is_some() {
+            return false;
+        }
+        if unmoved(piece) != head {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use concat_project::commands::{ClipPatch, NewMedia};
+    use concat_project::model::MediaKind;
+    use concat_project::{Command, Editor};
 
     #[test]
     fn unadopted_render_is_removed_but_adopted_media_survives() {
@@ -209,5 +278,133 @@ mod tests {
         assert!(output.is_file(), "undo/redo still needs adopted media");
         std::fs::remove_file(output).unwrap();
         std::fs::remove_dir(folder).unwrap();
+    }
+
+    /// An editor with one ten-second clip split at four seconds; the
+    /// pieces' ids come back in timeline order.
+    fn split_pair() -> (Editor, Vec<String>) {
+        let mut editor = Editor::new();
+        let item = NewMedia {
+            path: "/a.mp4".to_owned(),
+            name: "a.mp4".to_owned(),
+            duration: Some(10.0),
+            kind: MediaKind::Video,
+            width: Some(1920),
+            height: Some(1080),
+            frame_rate: Some(30.0),
+            frame_rate_fraction: Some("30/1".to_owned()),
+            video_codec: Some("h264".to_owned()),
+            audio_codec: None,
+            has_audio: false,
+            audio_tracks: Vec::new(),
+            origin: None,
+            color_space: Default::default(),
+        };
+        let media_id = editor
+            .apply(Command::AddMedia { item })
+            .expect("adds the media")
+            .created_id
+            .expect("the media is minted");
+        let track_id = editor.project().active().tracks[0].id.clone();
+        let whole = editor
+            .apply(Command::AddClip {
+                media_id,
+                track_id,
+                start: 0.0,
+                ripple: false,
+            })
+            .expect("adds the clip")
+            .created_id
+            .expect("the clip is minted");
+        editor
+            .apply(Command::SplitClips {
+                clip_ids: vec![whole],
+                time: 4.0,
+            })
+            .expect("splits");
+        let ids = editor
+            .project()
+            .active()
+            .clips
+            .iter()
+            .map(|clip| clip.id.clone())
+            .collect();
+        (editor, ids)
+    }
+
+    /// A fresh split's halves rejoin losslessly: the pieces differ only in
+    /// the windows the split rewound, which the merge puts back.
+    #[test]
+    fn a_fresh_split_rejoins_losslessly() {
+        let (editor, ids) = split_pair();
+        let timeline = editor.project().active();
+        assert!(
+            why_not_merge(timeline, &ids).is_none(),
+            "the shape is joinable"
+        );
+        assert!(
+            rejoin_is_faithful(timeline, &ids),
+            "and nothing in it would be bent"
+        );
+    }
+
+    /// A piece with an edit of its own - a fade or a gain the cut did not
+    /// leave on both halves - would lose it to a rejoin, so that selection
+    /// renders instead.
+    #[test]
+    fn a_piece_with_its_own_edit_renders_instead() {
+        let cases: [(&str, ClipPatch); 3] = [
+            (
+                "a fade-in in the middle",
+                ClipPatch {
+                    fade_in: Some(0.5),
+                    ..ClipPatch::default()
+                },
+            ),
+            (
+                "a gain only the tail carries",
+                ClipPatch {
+                    volume: Some(0.5),
+                    ..ClipPatch::default()
+                },
+            ),
+            (
+                "a mute",
+                ClipPatch {
+                    muted: Some(true),
+                    ..ClipPatch::default()
+                },
+            ),
+        ];
+        for (what, patch) in cases {
+            let (mut editor, ids) = split_pair();
+            editor
+                .apply(Command::UpdateClip {
+                    clip_id: ids[1].clone(),
+                    patch,
+                })
+                .expect("patches");
+            assert!(
+                !rejoin_is_faithful(editor.project().active(), &ids),
+                "{what} would be bent"
+            );
+        }
+    }
+
+    /// The head's own fade-out is replaced by the last piece's in a rejoin,
+    /// so an edit there renders too.
+    #[test]
+    fn the_heads_own_fade_out_renders_instead() {
+        let (mut editor, ids) = split_pair();
+        editor
+            .apply(Command::UpdateClip {
+                clip_id: ids[0].clone(),
+                patch: ClipPatch {
+                    fade_out: Some(0.5),
+                    ..ClipPatch::default()
+                },
+            })
+            .expect("patches");
+        assert!(!rejoin_is_faithful(editor.project().active(), &ids));
     }
 }

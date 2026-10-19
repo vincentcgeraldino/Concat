@@ -97,4 +97,9 @@ pub enum Error {
         /// Its name.
         name: String,
     },
+
+    /// A mix was told to stop, by the cancel flag its caller passed, and
+    /// stopped.
+    #[error("mix cancelled")]
+    Cancelled,
 }

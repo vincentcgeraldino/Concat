@@ -989,7 +989,9 @@ export component SettingsDialog inherits Modal {
                 // does not hold. Phones set their size the system's way
                 // anyway. The backend takes it as a multiplier rather than as
                 // a property, so Rust hands the window a scale-factor event
-                // to apply it (lib.rs, `on_settings_scale_changed`).
+                // to apply it - at Settings time, and from the first tick of
+                // the event loop for a remembered choice (lib.rs,
+                // `apply_ui_scale`).
                 // https://github.com/jub0t/Concat/issues/320
                 if !root.phone: DialogSection {
                     ruled: false;

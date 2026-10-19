@@ -13,6 +13,7 @@
 //! `Clip::source_time_at` is the one definition for picture.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use concat_core::animate::Track;
 use concat_core::time::Rational;
@@ -386,11 +387,29 @@ impl MixInput {
     }
 }
 
+/// Whether a caller's cancel flag says stop. Read with `Relaxed`: the flag
+/// is one-way, and nothing else is ordered against it.
+fn stopped(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
 /// Mixes `clips` into one AAC file at `destination`.
 ///
-/// Every clip's file must contain an audio stream; see [`mix_graph`].
-pub fn mix_to_file(clips: &[AudioClip], duration: f64, destination: &Path) -> Result<()> {
+/// Every clip's file must contain an audio stream; see [`mix_graph`]. The
+/// caller's `cancel` flag, when given, is read while the mix runs - once per
+/// input as they are opened, and once a round as they are fed - and ends it
+/// with [`Error::Cancelled`]. The file is then the partial write it got to,
+/// which the caller removes with the rest of a cancelled export.
+pub fn mix_to_file(
+    clips: &[AudioClip],
+    duration: f64,
+    destination: &Path,
+    cancel: Option<&AtomicBool>,
+) -> Result<()> {
     ffi::init();
+    if stopped(cancel) {
+        return Err(Error::Cancelled);
+    }
     // A bad chain is refused before any file is opened.
     for clip in clips {
         validate_chain(&clip.filter_chain)?;
@@ -407,6 +426,9 @@ pub fn mix_to_file(clips: &[AudioClip], duration: f64, destination: &Path) -> Re
     let mut leads: Vec<f64> = Vec::with_capacity(clips.len());
     let mut graph = filter::Graph::new();
     for (index, clip) in clips.iter().enumerate() {
+        if stopped(cancel) {
+            return Err(Error::Cancelled);
+        }
         let path = clip.path.as_path();
         let mut input =
             ffmpeg::format::input(path).map_err(|error| ffi::fail("open", path, error))?;
@@ -599,6 +621,9 @@ pub fn mix_to_file(clips: &[AudioClip], duration: f64, destination: &Path) -> Re
             .map_err(|error| ffi::fail("filter", &inputs[index].path, error))?;
     }
     'mix: loop {
+        if stopped(cancel) {
+            return Err(Error::Cancelled);
+        }
         // Pull everything the sink has.
         loop {
             let mut mixed = Audio::empty();
@@ -1185,7 +1210,7 @@ mod tests {
         };
         let clips = [piece(0.0, 0.0, 2.0), piece(2.0, 2.0, 4.0)];
         let target = output.clone();
-        let worker = std::thread::spawn(move || mix_to_file(&clips, 16.0, &target));
+        let worker = std::thread::spawn(move || mix_to_file(&clips, 16.0, &target, None));
         let started = std::time::Instant::now();
         while !worker.is_finished() {
             assert!(
@@ -1202,6 +1227,46 @@ mod tests {
         assert!(
             (seconds - 16.0).abs() < 0.1,
             "the mix is {seconds}s, not 16s"
+        );
+    }
+
+    /// A mix told to stop before it starts stops at once, says the
+    /// cancellation as such - the export treats a "cancelled" message as
+    /// the user's own doing, not a failure - and leaves no partial file
+    /// where it never got to open one.
+    #[test]
+    fn a_cancelled_mix_stops_before_it_writes() {
+        let dir = std::env::temp_dir();
+        let source = dir.join("concat-mix-cancel-source.m4a");
+        let output = dir.join("concat-mix-cancel-out.m4a");
+        silent_aac(&source, 2.0);
+        let clip = AudioClip {
+            path: source.clone(),
+            stream: None,
+            start: 0.0,
+            duration: 2.0,
+            source_start: 0.0,
+            speed: 1.0,
+            preserve_pitch: true,
+            volume: 1.0,
+            volume_curve: Track::default(),
+            fade_in: 0.0,
+            fade_out: 0.0,
+            filter_chain: String::new(),
+        };
+        let cancel = AtomicBool::new(true);
+        let result = mix_to_file(&[clip], 2.0, &output, Some(&cancel));
+        let _ = std::fs::remove_file(&source);
+        let written = output.exists();
+        let _ = std::fs::remove_file(&output);
+        let error = result.expect_err("a cancelled mix does not finish");
+        assert!(
+            error.to_string().contains("cancelled"),
+            "the cancellation is not named: {error}"
+        );
+        assert!(
+            !written,
+            "a mix cancelled before it opened anything wrote nothing"
         );
     }
 

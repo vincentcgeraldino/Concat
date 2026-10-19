@@ -195,7 +195,7 @@ fn clock_aac(wav: &Path, path: &Path, seconds: u32) {
         fade_out: 0.0,
         filter_chain: String::new(),
     };
-    sound::mix_to_file(&[clip], f64::from(seconds), path).expect("mixes the clock");
+    sound::mix_to_file(&[clip], f64::from(seconds), path, None).expect("mixes the clock");
 }
 
 /// A still: one solid colour no source second has.
