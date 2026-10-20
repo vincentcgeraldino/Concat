@@ -24,6 +24,9 @@ use concat_export::ExportClip;
 use concat_project::DocumentSettings;
 use concat_project::model::ColorSpace;
 
+#[cfg(feature = "gpu")]
+use concat_render::Compositor;
+
 /// How far ahead of the playhead playback opens the file a cut leads to;
 /// see [`Monitor::prefetch`].
 const NEXT_CUT: f64 = 1.0;
@@ -63,6 +66,14 @@ pub struct Monitor {
     /// The files a coming cut leads into that playback has already sent
     /// to be opened early, so each is opened once and not once a frame.
     early: Arc<Mutex<Vec<PathBuf>>>,
+    /// The window's device and queue, kept so a dead compositor can be built
+    /// again on them; see [`Monitor::texture_of`].
+    #[cfg(feature = "gpu")]
+    device: Option<(wgpu::Device, wgpu::Queue)>,
+    /// Whether the compositor has been built again since the last edit; see
+    /// [`Monitor::texture_of`].
+    #[cfg(feature = "gpu")]
+    rebuilt: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(feature = "gpu")]
     gpu: Option<Arc<Mutex<concat_render::WgpuCompositor>>>,
 }
@@ -95,6 +106,10 @@ impl Monitor {
             plan: Arc::new(Mutex::new(None)),
             early: Arc::new(Mutex::new(Vec::new())),
             #[cfg(feature = "gpu")]
+            device: None,
+            #[cfg(feature = "gpu")]
+            rebuilt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(feature = "gpu")]
             gpu: None,
         }
     }
@@ -108,6 +123,8 @@ impl Monitor {
             pool: Arc::clone(crate::scheduler().pool()),
             plan: Arc::new(Mutex::new(None)),
             early: Arc::new(Mutex::new(Vec::new())),
+            device: Some((device.clone(), queue.clone())),
+            rebuilt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             gpu: Some(Arc::new(Mutex::new(
                 concat_render::WgpuCompositor::with_device(device, queue),
             ))),
@@ -190,8 +207,9 @@ impl Monitor {
 
     /// Draws [`Monitor::frame_sources`] into a texture on the device this
     /// monitor was given: `Rgba8Unorm`, `spec.width` by `spec.height`,
-    /// bindable and renderable. Errs without a device, or once the device
-    /// is lost.
+    /// bindable and renderable. Errs without a device, or with a compositor
+    /// past its one rebuild: a dead one is built again on the same device,
+    /// the first frame after an edit; see the body.
     ///
     /// # Call this from the thread that owns the device, and nowhere else
     ///
@@ -217,6 +235,24 @@ impl Monitor {
             .as_ref()
             .ok_or_else(|| "the monitor has no GPU device".to_owned())?;
         let mut gpu = gpu.lock().map_err(|_| "compositor poisoned".to_owned())?;
+        if gpu.lost()
+            && !self
+                .rebuilt
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            // Dead is forever for one compositor, and the monitor had no way
+            // back to a live one: the picture went black and stayed black,
+            // even with the package that broke it taken off the clip, until
+            // the app restarted. Built again on the window's own device - a
+            // fresh compositor is not dead - once per edit, which is what
+            // `plan_for` reads as a new plan.
+            let (device, queue) = self
+                .device
+                .as_ref()
+                .ok_or_else(|| "the monitor has no GPU device".to_owned())?;
+            log::warn!("the monitor's compositor was dead; building another on the same device");
+            *gpu = concat_render::WgpuCompositor::with_device(device.clone(), queue.clone());
+        }
         if sources.needs_cpu() {
             // A packaged transition, and nothing else in the way, is drawn
             // whole on the device with no round trip through memory.
@@ -280,6 +316,11 @@ impl Monitor {
             color_space: spec.color_space,
             plan: Arc::clone(&plan),
         });
+        // A new plan is an edit: a dead compositor may be built again; see
+        // `texture_of`.
+        #[cfg(feature = "gpu")]
+        self.rebuilt
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         plan
     }
 

@@ -83,13 +83,10 @@ impl Default for AudioOptions {
     }
 }
 
-/// The graph between the codec and the caller, as one string. `origin` is
-/// the stream's own start, in seconds: the decoded frames carry it on their
-/// timestamps, so a cut `start` seconds into the sound is made at
-/// `origin + start` (see `ffi::start_of`).
-fn audio_filter(options: &AudioOptions, origin: f64) -> String {
+/// The graph between the codec and the caller, as one string.
+fn audio_filter(options: &AudioOptions, start: Option<f64>) -> String {
     let mut parts: Vec<String> = Vec::new();
-    match (options.start.map(|start| start + origin), options.duration) {
+    match (start, options.duration) {
         (Some(start), Some(duration)) => {
             parts.push(format!("atrim=start={start:.6}:duration={duration:.6}"));
             parts.push("asetpts=PTS-STARTPTS".to_owned());
@@ -135,6 +132,7 @@ pub struct AudioDecoder {
     origin: f64,
     decoder: decoder::Audio,
     options: AudioOptions,
+    sought: bool,
     graph: Option<filter::Graph>,
     /// The codec has been drained and the graph flushed; only what the sink
     /// still holds is left.
@@ -183,15 +181,17 @@ impl AudioDecoder {
             .map_err(|error| ffi::fail("open decoder", path, error))?;
 
         // Near the start, not at it: the graph's atrim does the exact cut,
-        // and a seek only saves decoding what comes before.
-        if let Some(start) = options.start
+        // and a seek only saves decoding what comes before. If seeking fails
+        // on an unindexed or variable-rate stream, decode proceeds from the
+        // start and atrim performs the trim.
+        let sought = if let Some(start) = options.start
             && start > 0.0
         {
             let target = ((start + origin) * f64::from(ffmpeg::sys::AV_TIME_BASE)) as i64;
-            input
-                .seek(target, ..=target)
-                .map_err(|error| ffi::fail("seek", path, error))?;
-        }
+            input.seek(target, ..=target).is_ok()
+        } else {
+            false
+        };
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -201,6 +201,7 @@ impl AudioDecoder {
             origin,
             decoder,
             options: options.clone(),
+            sought,
             graph: None,
             flushed: false,
             done: false,
@@ -245,10 +246,36 @@ impl AudioDecoder {
                 "",
             )
             .map_err(|error| ffi::fail("buffer sink", &self.path, error))?;
+
+        let start = if let Some(req_start) = self.options.start {
+            let target = req_start + self.origin;
+            if self.sought {
+                let landed = first
+                    .timestamp()
+                    .and_then(|ticks| ffi::seconds(ticks, self.time_base))
+                    .map(|at| at.as_f64());
+                if let Some(at) = landed
+                    && at >= target - 2.0
+                {
+                    // Frames carry the stream's absolute timestamps.
+                    Some(target)
+                } else {
+                    // Seeking already jumped near the cut point, but decoded frames
+                    // start from 0 (or have no timestamps). Trimming `target` again
+                    // would discard the audio that was already seeked to.
+                    Some(landed.unwrap_or(0.0).max(0.0))
+                }
+            } else {
+                Some(target)
+            }
+        } else {
+            None
+        };
+
         graph
             .output("in", 0)
             .and_then(|parser| parser.input("out", 0))
-            .and_then(|parser| parser.parse(&audio_filter(&self.options, self.origin)))
+            .and_then(|parser| parser.parse(&audio_filter(&self.options, start)))
             .map_err(|error| ffi::fail("filter graph", &self.path, error))?;
         graph
             .validate()
@@ -411,7 +438,7 @@ mod tests {
             stream: None,
         };
         assert_eq!(
-            audio_filter(&options, 0.0),
+            audio_filter(&options, options.start),
             "atrim=start=1.500000:duration=2.000000,asetpts=PTS-STARTPTS,atempo=2.000000,\
              aresample=16000,aformat=sample_fmts=flt:sample_rates=16000:channel_layouts=mono"
         );
@@ -419,7 +446,7 @@ mod tests {
 
     #[test]
     fn a_whole_file_has_no_trim() {
-        let graph = audio_filter(&AudioOptions::default(), 1.4);
+        let graph = audio_filter(&AudioOptions::default(), None);
         assert!(graph.starts_with("aresample=48000,"), "{graph}");
         assert!(graph.ends_with("channel_layouts=stereo"), "{graph}");
     }
@@ -431,7 +458,7 @@ mod tests {
             start: Some(0.5),
             ..AudioOptions::default()
         };
-        assert!(audio_filter(&options, 1.4).starts_with("atrim=start=1.900000,"));
+        assert!(audio_filter(&options, Some(0.5 + 1.4)).starts_with("atrim=start=1.900000,"));
     }
 
     /// A window into a file whose sound starts at 1.4 s - silence, then a

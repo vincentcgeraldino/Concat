@@ -306,8 +306,11 @@ fn gcd(a: i64, b: i64) -> i64 {
 pub struct LibraryView {
     /// The search box's text.
     pub query: String,
-    /// The chosen shelf, as an index into the kind's group list.
-    pub group: i32,
+    /// The chosen shelf, as an index into the kind's group list. A `Cell`
+    /// because the shelves' own build puts a pick back on its shelf when
+    /// the list is rebuilt, and that runs behind a shared borrow of the
+    /// studio.
+    pub group: std::cell::Cell<i32>,
     /// Only starred packages show, whatever shelf they are on.
     pub favourites: bool,
     /// Active category filter (e.g. "All", "Featured", "Retro & Film", etc.).
@@ -566,6 +569,8 @@ pub struct Models {
     /// The selected clip's two chains and their knobs.
     pub applied_visual: Rc<VecModel<AppliedEntryData>>,
     pub applied_audio: Rc<VecModel<AppliedEntryData>>,
+    /// The Sound tab's treatment switches; see [`TREATMENTS`].
+    pub promoted_audio: Rc<VecModel<TreatmentRowData>>,
     pub visual_params: Rc<VecModel<AppliedParamData>>,
     pub audio_params: Rc<VecModel<AppliedParamData>>,
     /// The colour panel's knobs.
@@ -647,6 +652,7 @@ impl Models {
             transition_groups: Rc::new(VecModel::default()),
             applied_visual: Rc::new(VecModel::default()),
             applied_audio: Rc::new(VecModel::default()),
+            promoted_audio: Rc::new(VecModel::default()),
             visual_params: Rc::new(VecModel::default()),
             audio_params: Rc::new(VecModel::default()),
             adjust_params: Rc::new(VecModel::default()),
@@ -1024,24 +1030,61 @@ fn new_title_style(prefs: &crate::prefs::Preferences) -> TextStyle {
 
 /// A label for a catalogue id: "black-white" reads as "Black White".
 /// One kind's shelves for the inspector: the shelf labels, in catalogue
-/// order, and every package on them with the index of its shelf.
+/// order, and every package on them that the library's search, shelf and
+/// star let through. The chain the shelf feeds comes in as well, so each
+/// entry can carry its row on it: Slint has no lookup, and a scan of the
+/// first few links misses the ones further down a chain.
 fn shelves(
     kind: PackageKind,
     view: &LibraryView,
+    groups_model: &Rc<VecModel<SharedString>>,
     favourites: &[String],
     look_art: &std::cell::RefCell<HashMap<String, slint::Image>>,
     card_paths: &HashMap<String, std::path::PathBuf>,
+    chain: &[String],
 ) -> (Vec<SharedString>, Vec<CatalogueEntryData>) {
+    // The packages of the kind, minus the colour panel's own: every picture
+    // clip can carry it, and it has a tab, not a shelf.
+    let packages: Vec<&concat_effects::catalogue::Package> = Catalogue::builtin()
+        .of_kind(kind)
+        .filter(|package| package.manifest.effect.id != ADJUST_ID)
+        .collect();
+    // The shelves are built from every package and never narrowed: a strip
+    // that lost a segment because a search matched nothing on it would move
+    // under the pointer as you typed.
     let mut groups: Vec<String> = Vec::new();
+    for package in &packages {
+        let meta = &package.manifest.effect;
+        let category = if meta.category.is_empty() {
+            "Other".to_owned()
+        } else {
+            meta.category.clone()
+        };
+        if !groups.contains(&category) {
+            groups.push(category);
+        }
+    }
+    // A picked shelf is held by its index into that list, and the list is
+    // rebuilt as packages come and go. The pick is put back on the shelf it
+    // names: one added ahead of it would otherwise move the pick under the
+    // pointer, and one that is gone would leave the pick naming another. A
+    // name gone altogether leaves no shelf picked - the library shows
+    // everything - rather than a shelf nobody asked for.
+    if let Some(name) = usize::try_from(view.group.get())
+        .ok()
+        .and_then(|index| groups_model.row_data(index))
+    {
+        view.group.set(
+            groups
+                .iter()
+                .position(|group| group.as_str() == name.as_str())
+                .map_or(-1, |index| index as i32),
+        );
+    }
     let mut entries = Vec::new();
     let query = view.query.trim().to_lowercase();
-    for package in Catalogue::builtin().of_kind(kind) {
+    for package in packages {
         let meta = &package.manifest.effect;
-        // The colour panel's own package: every picture clip can carry it,
-        // and it has a tab, not a shelf.
-        if meta.id == ADJUST_ID {
-            continue;
-        }
         let category = if meta.category.is_empty() {
             "Other".to_owned()
         } else {
@@ -1049,30 +1092,25 @@ fn shelves(
         };
         // Shelf and package names come from the manifests in English and
         // are looked up like any other string, so a locale can carry them.
-        let group = match groups.iter().position(|held| *held == category) {
-            Some(index) => index,
-            None => {
-                groups.push(category.clone());
-                groups.len() - 1
-            }
-        };
-        // The shelves are built from every package and only the entries are
-        // narrowed: a strip that lost a segment because a search matched
-        // nothing on it would move under the pointer as you typed.
+        let group = groups
+            .iter()
+            .position(|held| *held == category)
+            .unwrap_or(0);
         let name = meta.name.clone();
         let description = meta.description.clone();
         let starred = favourites.iter().any(|held| held == &meta.id);
-        let shown = if view.favourites {
-            starred
-        } else if !query.is_empty() {
-            // Across every shelf while a query is live. Someone typing
-            // "echo" wants the echo, not the echo that happens to be filed
-            // where they were already looking.
+        let shown = if !query.is_empty() {
+            // Across every shelf while a query is live - and over the star
+            // too: someone typing "echo" wants the echo, not the reason the
+            // star chip is down. The chip keeps its pick, and holds the
+            // list again the moment the box is emptied.
             name.to_lowercase().contains(&query) || description.to_lowercase().contains(&query)
+        } else if view.favourites {
+            starred
         } else if !view.category.is_empty() {
             package.matches_category(&view.category)
-        } else if view.group >= 0 {
-            group as i32 == view.group
+        } else if view.group.get() >= 0 {
+            group as i32 == view.group.get()
         } else {
             true
         };
@@ -1092,7 +1130,14 @@ fn shelves(
                         slint::Image::load_from_path(&folder.join("preview.png")).ok()
                     })
                     .or_else(|| {
+                        // A card planned but not yet drawn: the file is not
+                        // there, and loading it only logs what reads like an
+                        // error. `cards_arrived` drops the entry, so the art
+                        // is read again once the card lands.
                         let card = card_paths.get(&meta.id)?;
+                        if !card.is_file() {
+                            return None;
+                        }
                         slint::Image::load_from_path(card).ok()
                     })
                     .unwrap_or_default()
@@ -1106,6 +1151,10 @@ fn shelves(
             description: description.into(),
             favourite: starred,
             art,
+            chain: chain
+                .iter()
+                .position(|held| held == &meta.id)
+                .map_or(-1, |index| index as i32),
         });
     }
     (
@@ -1200,6 +1249,10 @@ struct ShelfStamp {
     lang: String,
     views: Vec<(String, i32, bool, String)>,
     favourites: Vec<String>,
+    /// Both chains' package ids, in order: each entry carries its row on the
+    /// one its shelf feeds, so a link landing or leaving rebuilds the
+    /// shelves it was on.
+    chains: (Vec<String>, Vec<String>),
 }
 
 /// The built-in colour package's id; see `adjust_rows` and `Studio::adjust_set`.
@@ -1577,6 +1630,44 @@ fn chain_colours(chain: &[AppliedFilter]) -> Vec<ColourKnobData> {
                             .unwrap_or(param.default),
                     ),
                 })
+        })
+        .collect()
+}
+
+/// The audio treatments the Sound tab promotes above the library: package
+/// id, then the i18n keys for the row's name and note.
+const TREATMENTS: [(&str, &str, &str); 3] = [
+    (
+        "concat.loudness",
+        "clipInspector.normalizeLoudness",
+        "clipInspector.bringsClipBroadcastLevel",
+    ),
+    (
+        "concat.denoise",
+        "clipInspector.reduceNoise",
+        "clipInspector.takesRoomsHissHum",
+    ),
+    (
+        "concat.enhance-voice",
+        "clipInspector.enhanceVoice",
+        "clipInspector.liftsSpeechOutMix",
+    ),
+];
+
+/// The treatments as the Sound tab's switches draw them: all three, in the
+/// tab's order, each with its row on the chain - the first match, like the
+/// tiles' - or -1 while it is off.
+fn treatment_rows(chain: &[AppliedFilter]) -> Vec<TreatmentRowData> {
+    TREATMENTS
+        .iter()
+        .map(|(id, label, note)| TreatmentRowData {
+            id: (*id).into(),
+            label: (*label).into(),
+            note: (*note).into(),
+            entry: chain
+                .iter()
+                .position(|link| link.id == *id)
+                .map_or(-1, |index| index as i32),
         })
         .collect()
 }
@@ -2173,7 +2264,7 @@ impl Studio {
         // The effects shelf starts on "All", not whatever a stale default
         // would leave it on.
         studio.library[1].category = "All".to_owned();
-        studio.library[1].group = -1;
+        studio.library[1].group.set(-1);
         studio
     }
 
@@ -6632,6 +6723,37 @@ impl Studio {
         self.clip_commit();
     }
 
+    /// A fade handle on clip `id` dragged to `seconds`: side 0 the fade-in,
+    /// side 1 the fade-out. Written as the volume line's drag is - onto the
+    /// echo, one undo step a drag, the clip need not be selected - and
+    /// clamped to half the clip, the limit the inspector's own control
+    /// keeps. See `clip_volume` for why a pending commit lands first.
+    pub fn clip_fade(&mut self, id: &str, side: i32, seconds: f32) {
+        let Some(clip) = self.clip(id) else {
+            return;
+        };
+        if self.locked(&clip.track_id) {
+            return;
+        }
+        if self.commit_pending && self.commit_targets != [id] {
+            self.flush_commit();
+        }
+        self.commit_targets = vec![id.to_owned()];
+        self.begin_echo();
+        if let Some(clip) = self.echo_clip_mut(id) {
+            // The inspector's own ceiling for the dials: half the clip, and
+            // ten seconds (`fade-limit` there). A drag the length of the
+            // lane asks for more than the sheet could ever show.
+            let value = f64::from(seconds).clamp(0.0, (clip.duration / 2.0).min(10.0));
+            if side == 0 {
+                clip.fade_in = value;
+            } else {
+                clip.fade_out = value;
+            }
+        }
+        self.clip_commit();
+    }
+
     /// The split tool pressed clip `id` at `seconds`: one cut, on the
     /// frame nearest the press, unless it is within a frame of either end
     /// or the lane is locked.
@@ -8000,6 +8122,16 @@ impl Studio {
         );
         sync(&models.applied_audio, sound);
         sync(&models.audio_params, sound_params);
+        // The Sound tab's treatments read the same chain again, published
+        // on their own so the three rows are there - off - while a clip
+        // without them is selected.
+        sync(
+            &models.promoted_audio,
+            match self.sole_selection().and_then(|id| self.clip(&id)) {
+                Some(clip) => treatment_rows(&clip.filters),
+                None => Vec::new(),
+            },
+        );
         sync(
             &models.adjust_params,
             match self.sole_selection().and_then(|id| self.clip(&id)) {
@@ -8119,7 +8251,7 @@ impl Studio {
     /// so the query goes.
     pub fn library_group(&mut self, shelf: i32, index: i32) {
         if let Some(view) = self.library_at(shelf) {
-            view.group = index.max(0);
+            view.group.set(index.max(0));
             view.category.clear();
             view.query.clear();
             view.favourites = false;
@@ -8130,18 +8262,22 @@ impl Studio {
     pub fn library_category(&mut self, shelf: i32, category: &str) {
         if let Some(view) = self.library_at(shelf) {
             view.category = category.to_owned();
-            view.group = -1;
+            view.group.set(-1);
             view.query.clear();
         }
     }
 
     /// The star chip. Turning it on clears the query for the same reason
     /// picking a shelf does: two filters at once is a list nobody can
-    /// predict the contents of.
+    /// predict the contents of. Turning it off leaves the query alone -
+    /// there is no second filter to hand the list back to, and the chip
+    /// down with a live query still searches every shelf.
     pub fn library_favourites(&mut self, shelf: i32, on: bool) {
         if let Some(view) = self.library_at(shelf) {
             view.favourites = on;
-            view.query.clear();
+            if on {
+                view.query.clear();
+            }
         }
     }
 
@@ -9240,6 +9376,20 @@ impl Studio {
         // through, so they are rebuilt here and `sync` makes an unchanged
         // one a no-op.
         let starred = &self.prefs.favourites;
+        // Both chains as plain ids: each shelf entry carries its row on the
+        // one its shelf feeds, and a link landing or leaving moves every
+        // row under it.
+        let (visual_chain, audio_chain): (Vec<String>, Vec<String>) =
+            match self.sole_selection().and_then(|id| self.clip(&id)) {
+                Some(clip) => (
+                    clip.video_effects
+                        .iter()
+                        .map(|link| link.id.clone())
+                        .collect(),
+                    clip.filters.iter().map(|link| link.id.clone()).collect(),
+                ),
+                None => (Vec::new(), Vec::new()),
+            };
         let stamp = ShelfStamp {
             catalogue: std::ptr::from_ref(Catalogue::builtin()) as usize,
             cards: self.cards_drawn,
@@ -9250,51 +9400,70 @@ impl Studio {
                 .map(|view| {
                     (
                         view.query.clone(),
-                        view.group,
+                        view.group.get(),
                         view.favourites,
                         view.category.clone(),
                     )
                 })
                 .collect(),
             favourites: starred.clone(),
+            chains: (visual_chain.clone(), audio_chain.clone()),
         };
         if self.shelf_stamp.borrow().as_ref() != Some(&stamp) {
-            let (groups, entries) = shelves(
-                SHELF_KINDS[0],
-                &self.library[0],
-                starred,
-                &self.look_art,
-                &self.card_paths,
-            );
-            sync(&models.filter_groups, groups);
-            sync(&models.catalogue_filters, entries);
-            let (groups, entries) = shelves(
-                SHELF_KINDS[1],
-                &self.library[1],
-                starred,
-                &self.look_art,
-                &self.card_paths,
-            );
-            sync(&models.effect_groups, groups);
-            sync(&models.catalogue_effects, entries);
-            let (groups, entries) = shelves(
-                SHELF_KINDS[2],
-                &self.library[2],
-                starred,
-                &self.look_art,
-                &self.card_paths,
-            );
-            sync(&models.audio_groups, groups);
-            sync(&models.catalogue_audio, entries);
-            let (groups, entries) = shelves(
-                SHELF_KINDS[3],
-                &self.library[3],
-                starred,
-                &self.look_art,
-                &self.card_paths,
-            );
-            sync(&models.transition_groups, groups);
-            sync(&models.catalogue_transitions, entries);
+            // Each build puts a library's pick back on the shelf it names,
+            // and the entries are then built from the shelf the pick now
+            // names. Putting the pick back can move it, so a build whose
+            // picks moved runs once more; the second settles them.
+            loop {
+                let picks: Vec<i32> = self.library.iter().map(|view| view.group.get()).collect();
+                let (groups, entries) = shelves(
+                    SHELF_KINDS[0],
+                    &self.library[0],
+                    &models.filter_groups,
+                    starred,
+                    &self.look_art,
+                    &self.card_paths,
+                    &visual_chain,
+                );
+                sync(&models.filter_groups, groups);
+                sync(&models.catalogue_filters, entries);
+                let (groups, entries) = shelves(
+                    SHELF_KINDS[1],
+                    &self.library[1],
+                    &models.effect_groups,
+                    starred,
+                    &self.look_art,
+                    &self.card_paths,
+                    &visual_chain,
+                );
+                sync(&models.effect_groups, groups);
+                sync(&models.catalogue_effects, entries);
+                let (groups, entries) = shelves(
+                    SHELF_KINDS[2],
+                    &self.library[2],
+                    &models.audio_groups,
+                    starred,
+                    &self.look_art,
+                    &self.card_paths,
+                    &audio_chain,
+                );
+                sync(&models.audio_groups, groups);
+                sync(&models.catalogue_audio, entries);
+                let (groups, entries) = shelves(
+                    SHELF_KINDS[3],
+                    &self.library[3],
+                    &models.transition_groups,
+                    starred,
+                    &self.look_art,
+                    &self.card_paths,
+                    &[],
+                );
+                sync(&models.transition_groups, groups);
+                sync(&models.catalogue_transitions, entries);
+                if self.library.iter().map(|view| view.group.get()).eq(picks) {
+                    break;
+                }
+            }
             *self.shelf_stamp.borrow_mut() = Some(stamp);
         }
         sync(
@@ -9303,7 +9472,7 @@ impl Studio {
                 .iter()
                 .map(|view| LibraryViewData {
                     query: view.query.as_str().into(),
-                    group: view.group,
+                    group: view.group.get(),
                     favourites: view.favourites,
                     category: view.category.as_str().into(),
                 })

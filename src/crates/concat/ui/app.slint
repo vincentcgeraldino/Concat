@@ -27,7 +27,7 @@ import { ProjectDialog, ProjectSheetData } from "dialogs/project.slint";
 import { RelinkDialog, RelinkData, MissingMediaItem } from "dialogs/relink.slint";
 import { ConfirmData, ConfirmDialog } from "dialogs/confirm.slint";
 import { CaptionsDialog, CaptionsSheetData } from "dialogs/captions.slint";
-import { SpeechDialog, SpeechSheetData } from "dialogs/speech.slint";
+import { SpeechDialog, SpeechSheetData, TagInsert } from "dialogs/speech.slint";
 import { DockDivider, DockSide, SeatBox } from "dock.slint";
 import { Editor } from "editor.slint";
 import { PaneKind, Panes } from "workspace/pane-switcher.slint";
@@ -317,7 +317,7 @@ export component App inherits Window {
     callback speech-use-sample-changed(on: bool);
     callback speech-sample-changed(index: int);
     /// See SpeechDialog.insert-tag: a string cut Rust does for the sheet.
-    pure callback speech-insert-tag(text: string, tag: string, at: int) -> string;
+    pure callback speech-insert-tag(text: string, tag: string, at: int) -> TagInsert;
     callback speech-begin();
     callback speech-cancel();
 

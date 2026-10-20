@@ -10,7 +10,7 @@ import { EffectData } from "../demo/effects-panel.slint";
 import {
     AdjustPanel, AppliedEntryData, AppliedParamData, AudioPanel, ProcessorRows,
     CatalogueEntryData, ColourKnobData, EnhancePanel, FilterPanel, PresetStack, SpeedPanel,
-    TransitionPanel, VideoPanel,
+    TransitionPanel, VideoPanel, TreatmentRowData,
 } from "../inspector/clip-inspector.slint";
 import {
     CurveData, CurveGroupData, WheelData, WheelGroupData,
@@ -153,6 +153,8 @@ export component ConfigPane inherits Rectangle {
     in property <[string]> audio-groups;
     in property <[AppliedEntryData]> applied-visual;
     in property <[AppliedEntryData]> applied-audio;
+    /// The Sound tab's treatment switches; see `TreatmentRowData`.
+    in property <[TreatmentRowData]> promoted-audio;
     in property <[AppliedParamData]> visual-params;
     in property <[AppliedParamData]> audio-params;
     /// The colour panel's knobs: the adjust package's parameters, at the
@@ -699,7 +701,7 @@ export component ConfigPane inherits Rectangle {
                     // ones a sound clip usually needs, so they get a switch
                     // rather than a search.
                     ProcessorRows {
-                        applied: root.applied-audio;
+                        treatments: root.promoted-audio;
                         params: root.audio-params;
                         add(id) => { root.chain-add(true, id); }
                         remove(index) => { root.chain-remove(true, index); }
@@ -709,6 +711,10 @@ export component ConfigPane inherits Rectangle {
                         commit => { root.clip-commit(); }
                     }
                     PresetStack {
+                        // Under the treatments, so its hairline marks the
+                        // start of the block rather than doubling the line
+                        // above it.
+                        first: false;
                         noun: I18n.t("common.audioEffect");
                         library-title: I18n.t("configPane.audioEffects");
                         shelf: 2;

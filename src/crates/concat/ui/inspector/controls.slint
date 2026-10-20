@@ -589,11 +589,15 @@ export component SwitchRow inherits HorizontalLayout {
 
     VerticalLayout {
         alignment: center;
-        Switch {
+        sw := Switch {
             checked <=> root.checked;
             toggled(on) => { root.toggled(on); }
         }
     }
+    // A press writes the switch's own copy, which ends the link to the row
+    // above it; the row is put back into the switch whenever it changes
+    // from anywhere else, so the two never read differently.
+    changed checked => { sw.checked = root.checked; }
 }
 
 // A "?" that explains on hover. The prose is a popover beside the mark, so
@@ -744,7 +748,10 @@ export component SearchField inherits Rectangle {
                 edited => { root.edited(self.text); }
             }
 
-            if root.text == "" && !input.has-focus: Text {
+            // Stays while the box is focused and empty: the caret is mark
+            // enough that the field is live, and the hint is what a person
+            // reaching for the field is reading.
+            if root.text == "": Text {
                 x: 0;
                 y: (parent.height - self.height) / 2;
                 text: root.placeholder;

@@ -1053,7 +1053,7 @@ export component PhoneEditor inherits Rectangle {
                 commit => { Editor.clip-commit(); }
             }
             ProcessorRows {
-                applied: Editor.applied-audio;
+                treatments: Editor.promoted-audio;
                 params: Editor.audio-params;
                 add(id) => { Editor.chain-add(true, id); }
                 remove(index) => { Editor.chain-remove(true, index); }
@@ -1063,6 +1063,8 @@ export component PhoneEditor inherits Rectangle {
                 commit => { Editor.clip-commit(); }
             }
             PresetStack {
+                // Under the treatments, as on the desk.
+                first: false;
                 noun: I18n.t("common.audioEffect");
                 library-title: I18n.t("configPane.audioEffects");
                 shelf: 2;

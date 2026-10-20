@@ -104,6 +104,7 @@ export component TimelinePane inherits Rectangle {
     callback clip-pressed(id: string, additive: bool, edge: int);
     callback clip-split(id: string, seconds: float);
     callback clip-volume(id: string, gain: float);
+    callback clip-fade(id: string, side: int, seconds: float);
     callback clip-dragged(seconds: float, pixels: length);
     callback clip-released();
     in property <[MenuItemData]> menu-items;
@@ -432,6 +433,7 @@ export component TimelinePane inherits Rectangle {
                 clip-pressed(id, additive, edge) => { root.clip-pressed(id, additive, edge); }
                 clip-split(id, seconds) => { root.clip-split(id, seconds); }
                 clip-volume(id, gain) => { root.clip-volume(id, gain); }
+                clip-fade(id, side, seconds) => { root.clip-fade(id, side, seconds); }
                 clip-dragged(seconds, pixels) => { root.clip-dragged(seconds, pixels); }
                 clip-released => { root.clip-released(); }
                 menu-items: root.menu-items;

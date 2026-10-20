@@ -476,7 +476,10 @@ fn a_transition_combines_its_two_inputs_by_progress() {
 /// Every packaged effect and filter with a shader actually renders on
 /// the GPU at its default settings - naga's validation at load catches
 /// a broken shader's syntax and types, but only a real pipeline creation
-/// and draw catches a binding or layout mistake.
+/// and draw catches a binding or layout mistake. A pass the compositor
+/// refuses - a pipeline the driver took and then would not draw, which is
+/// what `lab.halation`'s data-dependent blur loops were on FXC (#318) -
+/// fails here too.
 #[test]
 fn every_shader_package_renders_at_its_defaults() {
     let Some(mut gpu) = heavy_gpu() else { return };
@@ -494,10 +497,21 @@ fn every_shader_package_renders_at_its_defaults() {
             package.lut().cloned(),
             None,
         );
+        let key = pass.key.clone();
         let mut treated = layer(source.clone());
         treated.effects = vec![pass];
         let out = gpu.render(&plan(4, 4, vec![treated]));
         assert_eq!(out.pixels().len(), 4 * 4 * 4, "{}", package.id());
+        assert!(
+            !gpu.lost(),
+            "{}: the composite took the compositor down",
+            package.id()
+        );
+        assert!(
+            !gpu.refused.contains(&key),
+            "{}: the driver refused its pipeline",
+            package.id()
+        );
     }
 }
 

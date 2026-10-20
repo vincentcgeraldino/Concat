@@ -10,6 +10,7 @@ import { Select } from "../primitives/select.slint";
 import { Rail } from "../inspector/controls.slint";
 import { Wave } from "../primitives/wave.slint";
 import { Fmt } from "../util.slint";
+import { PaneScroll } from "../workspace/pane.slint";
 
 // Text to speech: what the tray's Speak tool and File › Text to speech open.
 //
@@ -75,6 +76,15 @@ export struct SpeechSheetData {
     message: string,
 }
 
+/// A tag button's answer: the script with the tag in it, and where the
+/// caret belongs - after the tag and the space written with it, which is
+/// not `at + tag.character-count + 1` when the caret sat against a word
+/// or already against a space.
+export struct TagInsert {
+    text: string,
+    caret: int,
+}
+
 // A list of recordings to pick a voice from, each drawn as its waveform
 // with its name and length beside it - a voice is heard, and a row of
 // names would say nothing about which one is the clean take. The shape is
@@ -88,6 +98,15 @@ component SamplePicker inherits Rectangle {
     in property <[string]> waves;
     in property <[string]> details;
     in-out property <int> current;
+    /// The row the model says is chosen; see Select's own. A press assigns
+    /// `current` and ends the caller's binding, and this puts it back
+    /// whenever the model moves.
+    in property <int> shown: -1;
+    changed shown => {
+        if (root.shown >= 0) {
+            root.current = root.shown;
+        }
+    }
 
     callback changed(index: int);
 
@@ -244,7 +263,7 @@ export component SpeechDialog inherits Modal {
     /// `tag` written into `text` at byte offset `at`, spaced as a word of
     /// its own. Rust does the writing: the expression language has no way
     /// to cut a string at an offset.
-    pure callback insert-tag(text: string, tag: string, at: int) -> string;
+    pure callback insert-tag(text: string, tag: string, at: int) -> TagInsert;
     callback begin();
     callback cancel();
 
@@ -252,6 +271,14 @@ export component SpeechDialog inherits Modal {
     title: I18n.t("speech.textToSpeech");
     glyph: Glyph.volume;
     surface-width: 520px;
+    // Fixed while the sheet is open rather than fitted, for Settings' own
+    // reason: the groups change length with the model picked and the note
+    // that may be under them, and a sheet that resized as it was used would
+    // be its own distraction. It also gives the tall sheet somewhere to put
+    // the surplus - the groups scroll - where a fitted one was capped by the
+    // window and squeezed the footer's note into the button under it.
+    // Running, there is only the report, and that fits itself.
+    surface-height: root.running ? 0px : 560px;
     dismissable: !root.data.running;
 
     // The script being typed, held apart from `data.text` the way the Field
@@ -301,262 +328,272 @@ export component SpeechDialog inherits Modal {
     }
 
     VerticalLayout {
-        if !root.running: DialogSection {
-            first: true;
-            title: I18n.t("common.script");
+        PaneScroll {
+            vertical-stretch: 1;
+            // A finger drags these groups as well, on the sheet that is
+            // the screen; a wheel is what a desk drives them with.
+            finger: root.fill;
 
-            Rectangle {
-                height: 104px;
-                border-radius: Theme.r;
-                background: Theme.well;
-                border-width: 1px;
-                border-color: script.has-focus ? Theme.accent : Theme.line;
-                clip: true;
+            if !root.running: DialogSection {
+                first: true;
+                title: I18n.t("common.script");
 
-                script := TextInput {
-                    x: 10px;
-                    y: 8px;
-                    width: parent.width - 20px;
-                    height: parent.height - 16px;
-                    text <=> root.draft;
-                    color: Theme.fg;
-                    font-size: Theme.fs-lg;
-                    single-line: false;
-                    wrap: word-wrap;
-                    selection-background-color: Theme.accent;
-                    selection-foreground-color: Theme.on-accent;
-                    changed has-focus => { root.typing = self.has-focus; }
-                    edited => { root.text-edited(self.text); }
-                    // Home and End are unbound in Slint on macOS and would
-                    // walk up to the window's playhead shortcuts.
-                    key-pressed(event) => {
-                        if (event.text == Key.Home) {
-                            self.set-selection-offsets(0, 0);
-                            return accept;
+                Rectangle {
+                    height: 104px;
+                    border-radius: Theme.r;
+                    background: Theme.well;
+                    border-width: 1px;
+                    border-color: script.has-focus ? Theme.accent : Theme.line;
+                    clip: true;
+
+                    script := TextInput {
+                        x: 10px;
+                        y: 8px;
+                        width: parent.width - 20px;
+                        height: parent.height - 16px;
+                        text <=> root.draft;
+                        color: Theme.fg;
+                        font-size: Theme.fs-lg;
+                        single-line: false;
+                        wrap: word-wrap;
+                        selection-background-color: Theme.accent;
+                        selection-foreground-color: Theme.on-accent;
+                        changed has-focus => { root.typing = self.has-focus; }
+                        edited => { root.text-edited(self.text); }
+                        // Home and End are unbound in Slint on macOS and would
+                        // walk up to the window's playhead shortcuts.
+                        key-pressed(event) => {
+                            if (event.text == Key.Home) {
+                                self.set-selection-offsets(0, 0);
+                                return accept;
+                            }
+                            if (event.text == Key.End) {
+                                self.set-selection-offsets(1000000000, 1000000000);
+                                return accept;
+                            }
+                            return reject;
                         }
-                        if (event.text == Key.End) {
-                            self.set-selection-offsets(1000000000, 1000000000);
-                            return accept;
-                        }
-                        return reject;
+                    }
+
+                    if root.draft == "" && !script.has-focus: Text {
+                        x: 10px;
+                        y: 8px;
+                        text: I18n.t("speech.typeNarrationReadAloud");
+                        color: Theme.fg-dim;
+                        font-size: Theme.fs-lg;
                     }
                 }
 
-                if root.draft == "" && !script.has-focus: Text {
-                    x: 10px;
-                    y: 8px;
-                    text: I18n.t("speech.typeNarrationReadAloud");
+                // Chatterbox alone reads these as what they say, so the row is
+                // its alone. Each lands at the caret as a word of its own, and
+                // the caret moves past it, so a laugh can be dropped mid-line
+                // without leaving the keyboard for long.
+                if root.data.family == 2: HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+
+                    Text {
+                        text: I18n.t("speech.expression");
+                        color: Theme.fg-muted;
+                        font-size: Theme.fs;
+                        vertical-alignment: center;
+                    }
+
+                    for tag in ["[laugh]", "[chuckle]", "[sigh]"]: Button {
+                        label: tag;
+                        ghost: true;
+                        clicked => {
+                            let at = script.cursor-position-byte-offset;
+                            let result = root.insert-tag(root.draft, tag, at);
+                            root.draft = result.text;
+                            root.text-edited(root.draft);
+                            script.focus();
+                            script.set-selection-offsets(result.caret, result.caret);
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.data.estimate;
                     color: Theme.fg-dim;
-                    font-size: Theme.fs-lg;
+                    font-family: Theme.font-technical;
+                    font-size: Theme.fs-sm;
                 }
             }
 
-            // Chatterbox alone reads these as what they say, so the row is
-            // its alone. Each lands at the caret as a word of its own, and
-            // the caret moves past it, so a laugh can be dropped mid-line
-            // without leaving the keyboard for long.
-            if root.data.family == 2: HorizontalLayout {
-                spacing: 6px;
-                alignment: start;
+            if !root.running: DialogSection {
+                title: I18n.t("speech.voice");
 
-                Text {
-                    text: I18n.t("speech.expression");
-                    color: Theme.fg-muted;
-                    font-size: Theme.fs;
-                    vertical-alignment: center;
-                }
-
-                for tag in ["[laugh]", "[chuckle]", "[sigh]"]: Button {
-                    label: tag;
-                    ghost: true;
-                    clicked => {
-                        let at = script.cursor-position-byte-offset;
-                        root.draft = root.insert-tag(root.draft, tag, at);
-                        root.text-edited(root.draft);
-                        script.focus();
-                        script.set-selection-offsets(at + tag.character-count + 1,
-                            at + tag.character-count + 1);
+                // The model first: it decides which voices there are and which
+                // of the dials below are shown.
+                DialogRow {
+                    label: I18n.t("common.model");
+                    Select {
+                        options: root.models;
+                        details: root.model-details;
+                        current: root.data.model;
+                        shown: root.data.model;
+                        placeholder: I18n.t("common.noneInstalled");
+                        enabled: root.models.length > 0;
+                        changed(index) => { root.model-changed(index); }
                     }
                 }
-            }
 
-            Text {
-                text: root.data.estimate;
-                color: Theme.fg-dim;
-                font-family: Theme.font-technical;
-                font-size: Theme.fs-sm;
-            }
-        }
-
-        if !root.running: DialogSection {
-            title: I18n.t("speech.voice");
-
-            // The model first: it decides which voices there are and which
-            // of the dials below are shown.
-            DialogRow {
-                label: I18n.t("common.model");
-                Select {
-                    options: root.models;
-                    details: root.model-details;
-                    current: root.data.model;
-                    placeholder: I18n.t("common.noneInstalled");
-                    enabled: root.models.length > 0;
-                    changed(index) => { root.model-changed(index); }
+                // The named voices, while a sample is not standing in for them.
+                if !root.data.use-sample: DialogRow {
+                    label: I18n.t("speech.voice");
+                    Select {
+                        options: root.voices;
+                        details: root.voice-details;
+                        current: root.data.voice;
+                        shown: root.data.voice;
+                        placeholder: I18n.t("speech.none");
+                        enabled: root.voices.length > 0;
+                        changed(index) => { root.voice-changed(index); }
+                    }
                 }
-            }
 
-            // The named voices, while a sample is not standing in for them.
-            if !root.data.use-sample: DialogRow {
-                label: I18n.t("speech.voice");
-                Select {
-                    options: root.voices;
-                    details: root.voice-details;
-                    current: root.data.voice;
-                    placeholder: I18n.t("speech.none");
-                    enabled: root.voices.length > 0;
-                    changed(index) => { root.voice-changed(index); }
-                }
-            }
-
-            // Chatterbox ships no recording of anyone's, so its named voices
-            // are Pocket's two, borrowed while Pocket is on disk. With
-            // neither there is nothing to read with but a sample.
-            if root.data.family == 2 && root.voices.length == 0 && !root.data.use-sample: Text {
-                text: I18n.t("speech.chatterboxHasNoVoice");
-                color: Theme.danger;
-                font-size: Theme.fs-sm;
-                wrap: word-wrap;
-            }
-
-            // What this model is, in a line, so the dials under it are not
-            // a surprise: a model that is missing one has never had it.
-            if root.data.ready: Text {
-                text: root.data.family == 0
-                    ? I18n.t("speech.speakersBuiltIntoModel")
-                    : root.data.family == 1
-                    ? I18n.t("speech.readsAnyVoiceFew")
-                    : I18n.t("speech.closestStudioVoiceReads");
-                color: Theme.fg-dim;
-                font-size: Theme.fs-sm;
-                wrap: word-wrap;
-            }
-
-            // Speed and pauses are sherpa's dials, and Chatterbox is not
-            // sherpa's: it reads at its own pace, and a slider it would
-            // ignore is a lie.
-            if root.data.family != 2: DialogRow {
-                label: I18n.t("common.speed");
-                Rail {
-                    value <=> root.speed-v;
-                    minimum: 0.5;
-                    maximum: 2;
-                    step: 0.05;
-                    default-value: 1;
-                    changed(v) => { root.speed-changed(v); }
-                }
-                Text {
-                    width: 52px;
-                    text: "\{Fmt.round-to(root.speed-v, 2)}×";
-                    color: Theme.fg-muted;
-                    font-family: Theme.font-technical;
+                // Chatterbox ships no recording of anyone's, so its named voices
+                // are Pocket's two, borrowed while Pocket is on disk. With
+                // neither there is nothing to read with but a sample.
+                if root.data.family == 2 && root.voices.length == 0 && !root.data.use-sample: Text {
+                    text: I18n.t("speech.chatterboxHasNoVoice");
+                    color: Theme.danger;
                     font-size: Theme.fs-sm;
-                    vertical-alignment: center;
-                    horizontal-alignment: right;
+                    wrap: word-wrap;
                 }
-            }
 
-            if root.data.family != 2: DialogRow {
-                label: I18n.t("speech.pauses");
-                Rail {
-                    value <=> root.pauses-v;
-                    minimum: 0;
-                    maximum: 1;
-                    step: 0.05;
-                    default-value: 0.2;
-                    changed(v) => { root.pauses-changed(v); }
-                }
-                Text {
-                    width: 52px;
-                    text: root.pauses-v < 0.1 ? I18n.t("common.none")
-                        : root.pauses-v < 0.35 ? I18n.t("speech.natural")
-                        : root.pauses-v < 0.7 ? I18n.t("speech.long")
-                        : I18n.t("speech.longer");
-                    color: Theme.fg-muted;
-                    font-family: Theme.font-technical;
+                // What this model is, in a line, so the dials under it are not
+                // a surprise: a model that is missing one has never had it.
+                if root.data.ready: Text {
+                    text: root.data.family == 0
+                        ? I18n.t("speech.speakersBuiltIntoModel")
+                        : root.data.family == 1
+                        ? I18n.t("speech.readsAnyVoiceFew")
+                        : I18n.t("speech.closestStudioVoiceReads");
+                    color: Theme.fg-dim;
                     font-size: Theme.fs-sm;
-                    vertical-alignment: center;
-                    horizontal-alignment: right;
+                    wrap: word-wrap;
                 }
-            }
 
-            // Pocket's flow steps: fewer is quicker, more is cleaner.
-            if root.data.family == 1: DialogRow {
-                label: I18n.t("common.quality");
-                SegmentedControl {
-                    options: [I18n.t("speech.quick"), I18n.t("common.balanced"), I18n.t("speech.fine")];
-                    current: root.data.quality;
-                    changed(index) => { root.quality-changed(index); }
+                // Speed and pauses are sherpa's dials, and Chatterbox is not
+                // sherpa's: it reads at its own pace, and a slider it would
+                // ignore is a lie.
+                if root.data.family != 2: DialogRow {
+                    label: I18n.t("common.speed");
+                    Rail {
+                        value <=> root.speed-v;
+                        minimum: 0.5;
+                        maximum: 2;
+                        step: 0.05;
+                        default-value: 1;
+                        changed(v) => { root.speed-changed(v); }
+                    }
+                    Text {
+                        width: 52px;
+                        text: "\{Fmt.round-to(root.speed-v, 2)}×";
+                        color: Theme.fg-muted;
+                        font-family: Theme.font-technical;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                    }
                 }
-            }
 
-            if !root.data.ready: Text {
-                text: I18n.t("speech.downloadVoiceModelFirst");
-                color: Theme.fg-muted;
-                font-size: Theme.fs-sm;
-                wrap: word-wrap;
-            }
-        }
-
-        // A sample voice: a recording from the bin in place of a named
-        // voice, for the two models that read in one. The switch is at the
-        // section's head, and the body folds away while it is off. The
-        // recordings are offered by their waveforms, since a voice is heard
-        // and not read, and the start slider says where in the recording
-        // the model listens from.
-        if !root.running && root.data.samples-offered: DialogSection {
-            title: I18n.t("speech.useSampleVoice");
-            switchable: true;
-            on: root.data.use-sample;
-            open: root.data.use-sample;
-            switched(on) => { root.use-sample-changed(on); }
-            hint: I18n.t("speech.readsVoiceHeardRecording");
-
-            if root.samples.length == 0: Text {
-                text: I18n.t("speech.importClipVoiceFirst");
-                color: Theme.fg-muted;
-                font-size: Theme.fs-sm;
-                wrap: word-wrap;
-            }
-
-            if root.samples.length > 0: DialogRow {
-                label: I18n.t("speech.sample");
-                SamplePicker {
-                    names: root.samples;
-                    waves: root.sample-waves;
-                    details: root.sample-details;
-                    current: root.data.sample;
-                    changed(index) => { root.sample-changed(index); }
+                if root.data.family != 2: DialogRow {
+                    label: I18n.t("speech.pauses");
+                    Rail {
+                        value <=> root.pauses-v;
+                        minimum: 0;
+                        maximum: 1;
+                        step: 0.05;
+                        default-value: 0.2;
+                        changed(v) => { root.pauses-changed(v); }
+                    }
+                    Text {
+                        width: 52px;
+                        text: root.pauses-v < 0.1 ? I18n.t("common.none")
+                            : root.pauses-v < 0.35 ? I18n.t("speech.natural")
+                            : root.pauses-v < 0.7 ? I18n.t("speech.long")
+                            : I18n.t("speech.longer");
+                        color: Theme.fg-muted;
+                        font-family: Theme.font-technical;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                    }
                 }
-            }
 
-            if root.samples.length > 0: DialogRow {
-                label: I18n.t("speech.voiceFrom");
-                Rail {
-                    value <=> root.reference-start-v;
-                    minimum: 0;
-                    maximum: Math.max(0, root.data.reference-length - 1);
-                    step: 0.5;
-                    default-value: 0;
-                    changed(v) => { root.reference-start-changed(v); }
+                // Pocket's flow steps: fewer is quicker, more is cleaner.
+                if root.data.family == 1: DialogRow {
+                    label: I18n.t("common.quality");
+                    SegmentedControl {
+                        options: [I18n.t("speech.quick"), I18n.t("common.balanced"), I18n.t("speech.fine")];
+                        current: root.data.quality;
+                        changed(index) => { root.quality-changed(index); }
+                    }
                 }
-                Text {
-                    width: 52px;
-                    text: I18n.t1("speech.sIn", "\{Fmt.round-to(root.reference-start-v, 1)}");
+
+                if !root.data.ready: Text {
+                    text: I18n.t("speech.downloadVoiceModelFirst");
                     color: Theme.fg-muted;
-                    font-family: Theme.font-technical;
                     font-size: Theme.fs-sm;
-                    vertical-alignment: center;
-                    horizontal-alignment: right;
+                    wrap: word-wrap;
+                }
+            }
+
+            // A sample voice: a recording from the bin in place of a named
+            // voice, for the two models that read in one. The switch is at the
+            // section's head, and the body folds away while it is off. The
+            // recordings are offered by their waveforms, since a voice is heard
+            // and not read, and the start slider says where in the recording
+            // the model listens from.
+            if !root.running && root.data.samples-offered: DialogSection {
+                title: I18n.t("speech.useSampleVoice");
+                switchable: true;
+                on: root.data.use-sample;
+                open: root.data.use-sample;
+                switched(on) => { root.use-sample-changed(on); }
+                hint: I18n.t("speech.readsVoiceHeardRecording");
+
+                if root.samples.length == 0: Text {
+                    text: I18n.t("speech.importClipVoiceFirst");
+                    color: Theme.fg-muted;
+                    font-size: Theme.fs-sm;
+                    wrap: word-wrap;
+                }
+
+                if root.samples.length > 0: DialogRow {
+                    label: I18n.t("speech.sample");
+                    SamplePicker {
+                        names: root.samples;
+                        waves: root.sample-waves;
+                        details: root.sample-details;
+                        current: root.data.sample;
+                        shown: root.data.sample;
+                        changed(index) => { root.sample-changed(index); }
+                    }
+                }
+
+                if root.samples.length > 0: DialogRow {
+                    label: I18n.t("speech.voiceFrom");
+                    Rail {
+                        value <=> root.reference-start-v;
+                        minimum: 0;
+                        maximum: Math.max(0, root.data.reference-length - 1);
+                        step: 0.5;
+                        default-value: 0;
+                        changed(v) => { root.reference-start-changed(v); }
+                    }
+                    Text {
+                        width: 52px;
+                        text: I18n.t1("speech.sIn", "\{Fmt.round-to(root.reference-start-v, 1)}");
+                        color: Theme.fg-muted;
+                        font-family: Theme.font-technical;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                    }
                 }
             }
         }

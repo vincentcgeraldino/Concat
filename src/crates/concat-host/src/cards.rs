@@ -274,6 +274,22 @@ impl Painter {
         write_card(&frame, path)
     }
 
+    /// Whether the compositor has given up: every frame it draws from here
+    /// is black, and the batch after a failed card asks for a fresh one.
+    pub fn compositor_lost(&self) -> bool {
+        self.compositor.lost()
+    }
+
+    /// Swaps in a compositor of its own, the pictures kept: what the batch
+    /// draws the rest of the cards on once the one it had is dead. None to
+    /// be had leaves the painter as it was, and the next card reports the
+    /// same.
+    pub fn replace_compositor(&mut self) {
+        if let Some(fresh) = WgpuCompositor::new() {
+            self.compositor = fresh;
+        }
+    }
+
     /// `card` drawn, as an opaque frame the still's size.
     pub fn frame(&mut self, card: &Card) -> Result<Frame, String> {
         let (width, height) = (self.still.width(), self.still.height());
@@ -321,7 +337,10 @@ impl Painter {
                 .ok_or("the transition's shader would not run")?,
         };
         if self.compositor.lost() {
-            return Err("the GPU device was lost".to_owned());
+            // This compositor gave up - on a frame the driver refused, or a
+            // readback that failed - and says black from here on, though the
+            // device under it is whole.
+            return Err("the compositor is dead".to_owned());
         }
         Ok(frame)
     }
@@ -414,10 +433,20 @@ pub fn draw_all(
         }
     };
     let mut batch = Vec::new();
+    // One replacement a batch: once the compositor is dead every card on it
+    // draws black, and opening a device a card would cost more than the
+    // cards behind a bad package are worth.
+    let mut replaced = false;
     for card in cards {
         match painter.draw(card) {
             Ok(()) => batch.push(card.id.clone()),
-            Err(error) => log::warn!("card {}: {error}", card.id),
+            Err(error) => {
+                log::warn!("card {}: {error}", card.id);
+                if painter.compositor_lost() && !replaced {
+                    replaced = true;
+                    painter.replace_compositor();
+                }
+            }
         }
         if batch.len() >= BATCH {
             report(std::mem::take(&mut batch), false);

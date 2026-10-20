@@ -239,6 +239,7 @@ export component Seat inherits Rectangle {
             audio-groups: Editor.audio-groups;
             applied-visual: Editor.applied-visual;
             applied-audio: Editor.applied-audio;
+            promoted-audio: Editor.promoted-audio;
             visual-params: Editor.visual-params;
             audio-params: Editor.audio-params;
             adjust-params: Editor.adjust-params;
@@ -441,6 +442,7 @@ export component Seat inherits Rectangle {
             }
             clip-split(id, seconds) => { Editor.clip-split(id, seconds); }
             clip-volume(id, gain) => { Editor.clip-volume(id, gain); }
+            clip-fade(id, side, seconds) => { Editor.clip-fade(id, side, seconds); }
             clip-dragged(seconds, pixels) => { Editor.clip-dragged(seconds, pixels); }
             clip-released => { Editor.clip-released(); }
             menu-items: Editor.menu-items;

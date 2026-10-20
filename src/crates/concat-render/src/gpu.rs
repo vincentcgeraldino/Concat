@@ -644,6 +644,10 @@ pub struct WgpuCompositor {
     /// Passes and transitions the driver refused a pipeline for, by key:
     /// tried once, skipped from then on, never asked for again.
     refused: std::collections::HashSet<String>,
+    /// Passes a real composite has asked for and [`WgpuCompositor::certify`]
+    /// has drawn once, by key: tried the first time a plan calls for them,
+    /// never again.
+    certified: std::collections::HashSet<String>,
     sampler: wgpu::Sampler,
     vertices: wgpu::Buffer,
     vertex_capacity: usize,
@@ -1265,6 +1269,7 @@ impl WgpuCompositor {
             shaders: HashMap::new(),
             transitions: HashMap::new(),
             refused: std::collections::HashSet::new(),
+            certified: std::collections::HashSet::new(),
             sampler,
             vertices,
             vertex_capacity: 6 * 8,
@@ -1650,6 +1655,10 @@ impl WgpuCompositor {
         if self.dead {
             return None;
         }
+        self.certify(plan);
+        if self.dead {
+            return None;
+        }
         let (draws, vertices) = self.prepare(plan);
         self.write_vertices(&vertices);
         let (canvas, canvas_texture, canvas_view) = self.canvas(plan.width, plan.height);
@@ -1724,6 +1733,47 @@ impl WgpuCompositor {
                 Err(format!(
                     "the pass did not finish within {timeout:?}: {error}"
                 ))
+            }
+        }
+    }
+
+    /// Trials every pass `plan` carries that this compositor has never drawn
+    /// in a real frame, and refuses the ones the trial fails.
+    ///
+    /// Why a trial at all: a pipeline can be invalid in a way no error scope
+    /// hears about. On DX12 an FXC translation failure goes to the device's
+    /// uncaptured handler, not to the scope pushed around the creation, so
+    /// the invalid pipeline was stored, `set_pipeline` then failed the first
+    /// real composite - caught only by the scope `Compositor::render` wraps
+    /// the whole frame in - and the compositor was dead from then on: a
+    /// black monitor, an export that would not start again, even with the
+    /// package taken off the clip (#318). The trial's own draw is where that
+    /// pipeline finally shows, inside a scope that can catch it; refused,
+    /// `run_passes` skips the pass and the frame draws without it.
+    fn certify(&mut self, plan: &FramePlan) {
+        /// A picture this many pixels a side runs every stage once; a bigger
+        /// one only makes the trial slower.
+        const SIDE: u32 = 16;
+        /// How long the trial may take before the pass is refused as one the
+        /// device will not answer for.
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+        let wanted: Vec<ShaderPass> = plan
+            .layers
+            .iter()
+            .flat_map(|layer| layer.effects.iter())
+            .chain(plan.treatments.iter().flat_map(|t| t.effects.iter()))
+            .filter(|pass| !self.certified.contains(&pass.key))
+            .cloned()
+            .collect();
+        for pass in wanted {
+            if self.dead {
+                return;
+            }
+            self.certified.insert(pass.key.clone());
+            if let Err(why) = self.trial_at(&pass, SIDE, WAIT) {
+                log::warn!("pass {} was refused after its trial: {why}", pass.key);
+                self.shaders.remove(&pass.key);
+                self.refused.insert(pass.key.clone());
             }
         }
     }
@@ -2823,6 +2873,10 @@ impl WgpuCompositor {
         let (width, height, time) = (from.width, from.height, from.seconds());
         let [from_texture, to_texture] = self.stages(width, height);
         for (plan, texture) in [(from, &from_texture), (to, &to_texture)] {
+            self.certify(plan);
+            if self.dead {
+                return None;
+            }
             let (draws, vertices) = self.prepare(plan);
             self.write_vertices(&vertices);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -3394,6 +3448,13 @@ impl Compositor for WgpuCompositor {
         // A dead device never comes back for this instance. What it hands
         // back is black, never a mid-export panic, and `lost` says so: the
         // export stops with an error rather than write a file of black.
+        if self.dead {
+            return Frame::black(plan.width, plan.height);
+        }
+        // A pass this compositor has never drawn goes through a trial of its
+        // own first; see `certify`. One that never answers the device can
+        // leave it dead, and then this is a black frame like any other.
+        self.certify(plan);
         if self.dead {
             return Frame::black(plan.width, plan.height);
         }

@@ -138,6 +138,9 @@ component Clip inherits Rectangle {
     /// The volume line dragged to `gain` - linear, 1 being unity, 2 the
     /// top of the band - while the drag lasts.
     callback volume-dragged(gain: float);
+    /// A fade handle dragged: `side` 0 is the fade-in, 1 the fade-out,
+    /// to `seconds` of ramp - while the drag lasts.
+    callback fade-dragged(side: int, seconds: float);
     /// Window-space delta since the press: seconds across, pixels down. Not
     /// lanes down — the lanes differ in height, so which row a drag has
     /// reached is a question only the side holding the heights can answer.
@@ -410,8 +413,8 @@ component Clip inherits Rectangle {
             y: 0;
             width: parent.width;
             height: parent.height;
-            fade-in: root.item.fade-in;
-            fade-out: root.item.fade-out;
+            fade-in: root.shown-fade-in;
+            fade-out: root.shown-fade-out;
             px-per-second: root.px-per-second;
             ramp-h: root.fade-h;
         }
@@ -460,8 +463,8 @@ component Clip inherits Rectangle {
             y: 0;
             width: parent.width;
             height: parent.height;
-            fade-in: root.item.fade-in;
-            fade-out: root.item.fade-out;
+            fade-in: root.shown-fade-in;
+            fade-out: root.shown-fade-out;
             px-per-second: root.px-per-second;
         }
 
@@ -690,6 +693,205 @@ component Clip inherits Rectangle {
             x: 5px;
             height: parent.height;
             text: "\{Math.round(root.shown-gain * 100)} %";
+            color: Colors.black;
+            font-family: Theme.font-technical;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+        }
+    }
+
+    // ── the fade handles ─────────────────────────────────────────────────
+    //
+    // The ramps' corners are the grabs: a hover wears a small knob where
+    // the fade's edge meets the top, and a drag from there pulls the fade
+    // out, the wedge following the pointer the way the volume line follows
+    // its own drag. The grab rides the edge, so an existing fade is taken
+    // hold of where it ends - the way every editor's handles are - and a
+    // fade at zero still has its corner. Where the ramps are is where the
+    // handles are, and the inspector keeps the numbers, as it does for
+    // the volume line.
+    property <bool> fadable: root.item.kind == ClipKind.audio
+        || root.item.kind == ClipKind.video
+        || root.item.kind == ClipKind.image
+        || root.item.kind == ClipKind.filter;
+    /// The ramps' region - a filter layer's bar is all ramps; see `fade-h`.
+    property <length> fade-area-top: root.all-strip ? 0px
+        : root.header-h + root.body-h - root.fade-h;
+    property <length> fade-area-h: root.all-strip ? root.height : root.fade-h;
+    property <length> fade-grab-w: 18px;
+    /// The handles are live with the select tool out, when the clip is
+    /// tall enough to wear them and long enough that they do not meet.
+    property <bool> fade-handled: root.fadable && !root.locked
+        && root.tool == TimelineTool.select
+        && root.fade-area-h >= 12px && root.width > 44px;
+    property <bool> fade-in-hover: false;
+    property <bool> fade-out-hover: false;
+    /// The drag in flight: which handle, and to what. The fades shown are
+    /// the drag's while one lasts, the clip's otherwise.
+    property <bool> fade-live;
+    property <int> fade-side;
+    property <float> drag-fade;
+    property <float> shown-fade-in: (root.fade-live && root.fade-side == 0)
+        ? root.drag-fade : root.item.fade-in;
+    property <float> shown-fade-out: (root.fade-live && root.fade-side == 1)
+        ? root.drag-fade : root.item.fade-out;
+
+    changed fade-handled => {
+        // A handle taken away mid-drag - the tool moved off select, the lane
+        // was locked, the zoom made the ramps too thin - goes without ever
+        // seeing an up, and the drag would live on, the wedge showing its
+        // value while the model took another - an undo, a dial - under it.
+        if (!root.fade-handled) {
+            root.fade-live = false;
+        }
+    }
+
+    /// Where a handle's grab sits: centred on the fade's edge, held inside
+    /// the clip so a fade at zero still has its corner to be grabbed.
+    pure function fade-grab-x(center: length) -> length {
+        return Math.max(0px, Math.min(root.width - root.fade-grab-w,
+            center - root.fade-grab-w / 2));
+    }
+
+    /// The longest fade the model takes: the inspector's own dial ceiling,
+    /// ten seconds or half the clip, whatever this clip's width shows.
+    pure function fade-cap() -> float {
+        return Math.min(10.0, (root.width / root.px-per-second) / 2);
+    }
+    /// The length label's height above the ramps' region - never above the
+    /// header, and centred on a filter layer's bar, which has no room above.
+    pure function fade-label-y(h: length) -> length {
+        return root.all-strip ? (root.height - h) / 2
+            : Math.max(root.header-h, root.fade-area-top - h - 4px);
+    }
+
+    if root.fade-handled: fade-in-grab := TouchArea {
+        x: root.fade-grab-x(root.shown-fade-in * root.px-per-second);
+        y: root.fade-area-top;
+        width: root.fade-grab-w;
+        height: Math.min(18px, root.fade-area-h);
+        mouse-cursor: MouseCursor.ew-resize;
+
+        changed has-hover => { root.fade-in-hover = self.has-hover; }
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down
+                && event.button == PointerEventButton.left) {
+                root.drag-fade = root.item.fade-in;
+                root.fade-side = 0;
+                root.fade-live = true;
+            } else if (event.kind == PointerEventKind.up
+                || event.kind == PointerEventKind.cancel) {
+                root.fade-live = false;
+            }
+        }
+        moved => {
+            if (root.fade-live && root.fade-side == 0 && root.px-per-second > 0px) {
+                // Seconds from the leading edge to the pointer: the wedge
+                // is as long as the fade, so the edge is the pointer. Back
+                // within a few pixels of the corner is none at all - a
+                // fade dragged off, not a sliver left behind.
+                let edge = self.absolute-position.x + self.mouse-x
+                    - root.absolute-position.x;
+                let secs = edge < 5px ? 0.0 : edge / root.px-per-second;
+                root.drag-fade = Math.min(Math.round(secs * 1000) / 1000,
+                    root.fade-cap());
+                root.fade-dragged(0, root.drag-fade);
+            }
+        }
+    }
+
+    if root.fade-handled: fade-out-grab := TouchArea {
+        x: root.fade-grab-x(
+            root.width - root.shown-fade-out * root.px-per-second);
+        y: root.fade-area-top;
+        width: root.fade-grab-w;
+        height: Math.min(18px, root.fade-area-h);
+        mouse-cursor: MouseCursor.ew-resize;
+
+        changed has-hover => { root.fade-out-hover = self.has-hover; }
+
+        pointer-event(event) => {
+            if (event.kind == PointerEventKind.down
+                && event.button == PointerEventButton.left) {
+                root.drag-fade = root.item.fade-out;
+                root.fade-side = 1;
+                root.fade-live = true;
+            } else if (event.kind == PointerEventKind.up
+                || event.kind == PointerEventKind.cancel) {
+                root.fade-live = false;
+            }
+        }
+        moved => {
+            if (root.fade-live && root.fade-side == 1 && root.px-per-second > 0px) {
+                // The same, measured from the trailing edge.
+                let edge = root.absolute-position.x + root.width
+                    - (self.absolute-position.x + self.mouse-x);
+                let secs = edge < 5px ? 0.0 : edge / root.px-per-second;
+                root.drag-fade = Math.min(Math.round(secs * 1000) / 1000,
+                    root.fade-cap());
+                root.fade-dragged(1, root.drag-fade);
+            }
+        }
+    }
+
+    // The knobs on the edges, while their corners are hovered or their
+    // drags last.
+    if root.fade-handled
+        && (root.fade-in-hover || (root.fade-live && root.fade-side == 0)): Rectangle {
+        x: root.fade-grab-x(root.shown-fade-in * root.px-per-second) + 4.5px;
+        y: root.fade-area-top - 4px;
+        width: 9px;
+        height: 9px;
+        border-radius: 2px;
+        background: Theme.fade-edge;
+    }
+
+    if root.fade-handled
+        && (root.fade-out-hover || (root.fade-live && root.fade-side == 1)): Rectangle {
+        x: root.fade-grab-x(
+            root.width - root.shown-fade-out * root.px-per-second) + 4.5px;
+        y: root.fade-area-top - 4px;
+        width: 9px;
+        height: 9px;
+        border-radius: 2px;
+        background: Theme.fade-edge;
+    }
+
+    // The fade's length, while its corner is hovered or its drag lasts.
+    if root.fade-handled
+        && (root.fade-in-hover || (root.fade-live && root.fade-side == 0)): Rectangle {
+        x: 6px;
+        y: root.fade-label-y(self.height);
+        width: fade-in-label.preferred-width + 10px;
+        height: 16px;
+        border-radius: Theme.r-sm;
+        background: Colors.white;
+
+        fade-in-label := Text {
+            x: 5px;
+            height: parent.height;
+            text: root.format-seconds(root.shown-fade-in);
+            color: Colors.black;
+            font-family: Theme.font-technical;
+            font-size: Theme.fs-sm;
+            vertical-alignment: center;
+        }
+    }
+
+    if root.fade-handled
+        && (root.fade-out-hover || (root.fade-live && root.fade-side == 1)): Rectangle {
+        x: root.width - self.width - 6px;
+        y: root.fade-label-y(self.height);
+        width: fade-out-label.preferred-width + 10px;
+        height: 16px;
+        border-radius: Theme.r-sm;
+        background: Colors.white;
+
+        fade-out-label := Text {
+            x: 5px;
+            height: parent.height;
+            text: root.format-seconds(root.shown-fade-out);
             color: Colors.black;
             font-family: Theme.font-technical;
             font-size: Theme.fs-sm;
@@ -1112,6 +1314,9 @@ export component Lanes inherits Rectangle {
     callback clip-split(id: string, seconds: float);
     /// A clip's volume line dragged to `gain`.
     callback clip-volume(id: string, gain: float);
+    /// A clip's fade handle dragged: `side` 0 the fade-in, 1 the fade-out,
+    /// to `seconds`.
+    callback clip-fade(id: string, side: int, seconds: float);
     callback clip-dragged(seconds: float, pixels: length);
     callback clip-released();
     /// Right-click on a clip. The caller fills the menu and bumps `menu-token`;
@@ -1466,6 +1671,7 @@ export component Lanes inherits Rectangle {
                 root.clip-split(entry.id, entry.start + x / root.px-per-second);
             }
             volume-dragged(gain) => { root.clip-volume(entry.id, gain); }
+            fade-dragged(side, seconds) => { root.clip-fade(entry.id, side, seconds); }
             // The clip reports its delta from the press; a view that has
             // scrolled since then is added, so the clip stays under the
             // pointer while the edge scrolls it along.

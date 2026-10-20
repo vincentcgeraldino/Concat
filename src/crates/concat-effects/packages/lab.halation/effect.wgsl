@@ -22,6 +22,13 @@ struct Params { threshold: f32, radius: f32, amount: f32, tint: f32 }
 /// as a share of the layer, so a halo reads the same on a phone and a 4K cut.
 const TAU: f32 = 3.14159265;
 
+/// Taps a side of the centre, per pass: a constant in the source, never
+/// read from the picture. FXC will not unroll a loop whose count it cannot
+/// see, and a `sample` - an implicit gradient - inside a loop it cannot
+/// unroll is a compile error (X3570, then X3511 once the count is in the
+/// hundreds), so the count lives here and the step carries the width.
+const TAPS: i32 = 12;
+
 fn weight(d: f32, s: f32) -> f32 {
     return exp(-d * d / (2.0 * s * s));
 }
@@ -37,9 +44,11 @@ fn source_at(uv: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(c.rgb * passed * c.a, c.a);
 }
 
-/// `source_at`'s light weighed along its row about `uv`, two pixels to a
-/// fetch. The screen distance, so the scaling trap either way is caught in
-/// the middle, where `bloom_texel` is the picture's own pixel.
+/// `source_at`'s light weighed along its row about `uv`: `2 * TAPS` taps
+/// from `centre - reach` to `centre + reach`, a step apart, the step
+/// widening with `sigma` so one fixed count covers any width. The screen
+/// distance, so the scaling trap either way is caught in the middle, where
+/// `bloom_texel` is the picture's own pixel.
 fn across(uv: vec2<f32>) -> vec4<f32> {
     let width = frame.size.x;
     if (width < 1.0) {
@@ -48,17 +57,16 @@ fn across(uv: vec2<f32>) -> vec4<f32> {
     let screen = length((uv - vec2<f32>(0.5)) * vec2<f32>(2.0));
     let sigma = params.radius / 100.0 * screen * frame.size.y / TAU;
     let centre = uv.x * width;
-    let first = floor(centre - TAU * sigma - 0.5) + 0.5;
-    let pairs = i32(ceil(TAU * sigma)) + 1;
+    let reach = TAU * sigma;
+    let step = max(reach, 0.5) / f32(TAPS);
+    let first = centre - reach + step * 0.5;
     var sum = vec4<f32>(0.0);
     var total = 0.0;
-    for (var i = 0; i < pairs; i++) {
-        let a = first + f32(2 * i);
-        let wa = weight(a - centre, sigma);
-        let wb = weight(a + 1.0 - centre, sigma);
-        let w = wa + wb;
+    for (var i = 0; i < 2 * TAPS; i++) {
+        let a = first + f32(i) * step;
+        let w = weight(a - centre, sigma);
         if (w > 0.0) {
-            sum += source_at(vec2<f32>((a + wb / w) / width, uv.y)) * w;
+            sum += source_at(vec2<f32>(a / width, uv.y)) * w;
             total += w;
         }
     }
@@ -68,23 +76,23 @@ fn across(uv: vec2<f32>) -> vec4<f32> {
     return sum / total;
 }
 
-/// `across` weighed down its column about `uv`, in its own pixels.
+/// `across` weighed down its column about `uv`, in its own pixels, the same
+/// fixed taps and widening step.
 fn down(uv: vec2<f32>) -> vec4<f32> {
     let rows = 1.0 / across_texel().y;
     let screen = length((uv - vec2<f32>(0.5)) * vec2<f32>(2.0));
     let sigma = params.radius / 100.0 * screen * 2.0;
     let centre = uv.y * rows;
-    let first = floor(centre - TAU * sigma - 0.5) + 0.5;
-    let pairs = i32(ceil(TAU * sigma)) + 1;
+    let reach = TAU * sigma;
+    let step = max(reach, 0.5) / f32(TAPS);
+    let first = centre - reach + step * 0.5;
     var sum = vec4<f32>(0.0);
     var total = 0.0;
-    for (var i = 0; i < pairs; i++) {
-        let a = first + f32(2 * i);
-        let wa = weight(a - centre, sigma);
-        let wb = weight(a + 1.0 - centre, sigma);
-        let w = wa + wb;
+    for (var i = 0; i < 2 * TAPS; i++) {
+        let a = first + f32(i) * step;
+        let w = weight(a - centre, sigma);
         if (w > 0.0) {
-            sum += across_at(vec2<f32>(uv.x, (a + wb / w) / rows)) * w;
+            sum += across_at(vec2<f32>(uv.x, a / rows)) * w;
             total += w;
         }
     }
@@ -97,10 +105,12 @@ fn down(uv: vec2<f32>) -> vec4<f32> {
 /// The halo's colour at a tint: negative the deep red of a dense negative,
 /// positive the orange of a print, zero the red-orange of the stock.
 fn halation_tint(t: f32) -> vec3<f32> {
-    // LAB EXPERIMENT: red-orange stock swapped for a cyan halo, to prove
-    // the package's own WGSL is what runs, not the built-in's.
-    _ = t;
-    return vec3<f32>(0.15, 0.75, 1.0);
+    let stock = vec3<f32>(1.0, 0.42, 0.16);
+    let u = clamp(t / 100.0, -1.0, 1.0);
+    if (u < 0.0) {
+        return mix(stock, vec3<f32>(1.0, 0.10, 0.0), -u);
+    }
+    return mix(stock, vec3<f32>(1.0, 0.72, 0.28), u);
 }
 
 fn effect(uv: vec2<f32>) -> vec4<f32> {

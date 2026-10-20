@@ -90,11 +90,18 @@ pub enum SpeechMsg {
     /// Read the script.
     Begin,
     Cancel,
-    /// The synthesiser's worker reporting where it is, `0..=1`.
-    Progress(JobStage),
-    /// The synthesiser's worker is done: the file it wrote, probed, or
-    /// why not.
-    Finished(Box<Result<MediaSummary, String>>),
+    /// The synthesiser's worker reporting where it is, `0..=1`, and the run
+    /// it belongs to: see [`SpeechPane`]'s generation.
+    Progress {
+        run: u64,
+        stage: JobStage,
+    },
+    /// The synthesiser's worker is done: the file it wrote, probed, or why
+    /// not, and the run it belongs to.
+    Finished {
+        run: u64,
+        result: Box<Result<MediaSummary, String>>,
+    },
 }
 
 /// The speech sheet's state.
@@ -107,8 +114,10 @@ pub struct SpeechPane {
     pub text: String,
     /// Row in the chosen model's voices; see [`SpeechPane::offered`].
     pub voice: usize,
-    /// Row in the installed voice model list.
-    pub model: usize,
+    /// The chosen model, by its id in the installed list rather than by
+    /// row: the list can gain a model under the sheet - a download landing
+    /// while it is open - and the row a press named would then be another.
+    pub model_id: String,
     /// The family of the chosen model, which is which voices are offered
     /// and which of the dials below are read.
     pub family: Family,
@@ -133,6 +142,10 @@ pub struct SpeechPane {
     /// The model and the length of the running read: what its timing is
     /// kept by.
     reading: Option<(String, f32)>,
+    /// Which run a worker on its way belongs to. A cancel or a new run
+    /// bumps it, and a report from an older one is dropped: by the time it
+    /// lands the sheet has moved on, and its numbers are not its own.
+    generation: u64,
     /// How long each model took this session, for the next read's bar.
     timings: Timings,
     pub message: String,
@@ -143,6 +156,15 @@ pub struct SpeechPane {
 }
 
 impl SpeechPane {
+    /// A setting the sheet reads changed, so the note the last run left -
+    /// which names the script, the model, the voice or the sample - is
+    /// about a sheet that no longer exists: a Pocket note standing over a
+    /// Kokoro voice. It goes rather than waiting for the next run, since an
+    /// old note beside the button that failed is read as a new one.
+    fn drop_message(&mut self) {
+        self.message.clear();
+    }
+
     /// Applies one message. The studio is the rest of the window; while
     /// this runs the studio's copy of the pane is a blank it must not read.
     pub fn update(&mut self, msg: SpeechMsg, studio: &mut Studio) {
@@ -166,7 +188,10 @@ impl SpeechPane {
                         .and_then(|clip| clip.text.map(|text| text.content))
                         .unwrap_or_default(),
                     voice: 0,
-                    model,
+                    model_id: installed
+                        .get(model)
+                        .map(|model| model.id.clone())
+                        .unwrap_or_default(),
                     family,
                     speed: 1.0,
                     quality: 1,
@@ -186,18 +211,44 @@ impl SpeechPane {
                 self.sample = self.default_sample(studio);
             }
             SpeechMsg::Close => self.open = false,
-            SpeechMsg::TextEdited(text) => self.text = text,
-            SpeechMsg::VoiceChanged(index) => self.voice = index.max(0) as usize,
+            SpeechMsg::TextEdited(text) => {
+                self.text = text;
+                self.drop_message();
+            }
+            SpeechMsg::VoiceChanged(index) => {
+                self.voice = index.max(0) as usize;
+                self.drop_message();
+            }
             SpeechMsg::ModelChanged(index) => {
-                self.model = index.max(0) as usize;
+                // Kept by id, not by row: the list can gain a model under
+                // the sheet, and the row a press named would then be
+                // another model. Remembered like the voice, too, so the
+                // sheet opens again on it rather than on Settings' pick.
+                self.model_id = installed(&studio.settings.voices)
+                    .get(index.max(0) as usize)
+                    .map(|model| model.id.clone())
+                    .unwrap_or_default();
+                self.drop_message();
                 // Another model may read with other voices: the list is
                 // rebuilt, and the row points at a voice on it.
                 let chosen = self.offered().get(self.voice).map(|voice| voice.id);
-                self.family = installed(&studio.settings.voices)
-                    .get(self.model)
-                    .map(|model| family_of(&model.id))
-                    .unwrap_or(Family::Kokoro);
+                self.family = if self.model_id.is_empty() {
+                    Family::Kokoro
+                } else {
+                    family_of(&self.model_id)
+                };
                 self.voice = self.voice_row(chosen);
+                // A model that reads only with its own voices reads nothing
+                // from a sample. Left on, the switch would sit behind a
+                // section that is no longer offered, and Begin would refuse
+                // for a reason off-screen.
+                if self.sample_voice().is_none() {
+                    self.use_sample = false;
+                }
+                if !self.model_id.is_empty() {
+                    studio.prefs.tts_model = Some(self.model_id.clone());
+                    studio.prefs.save(&studio.host.dirs);
+                }
             }
             SpeechMsg::SpeedChanged(speed) => {
                 self.speed = if speed.is_finite() {
@@ -221,21 +272,38 @@ impl SpeechPane {
                     f64::from(seconds.max(0.0))
                 } else {
                     0.0
-                }
+                };
+                self.drop_message();
             }
-            SpeechMsg::UseSampleChanged(on) => self.use_sample = on,
+            SpeechMsg::UseSampleChanged(on) => {
+                self.use_sample = on;
+                self.drop_message();
+            }
             SpeechMsg::SampleChanged(index) => {
                 self.sample = index.max(0) as usize;
                 self.reference_start = 0.0;
+                self.drop_message();
             }
             SpeechMsg::Begin => self.run(studio),
             SpeechMsg::Cancel => {
                 studio.host.speech.cancel();
+                // Whatever the worker reports from here on belongs to a run
+                // the sheet has left: dropped rather than landed.
+                self.generation = self.generation.wrapping_add(1);
                 self.running = false;
                 self.open = false;
             }
-            SpeechMsg::Progress(stage) => self.pace.report(stage),
-            SpeechMsg::Finished(result) => {
+            SpeechMsg::Progress { run, stage } => {
+                if run == self.generation {
+                    self.pace.report(stage);
+                }
+            }
+            SpeechMsg::Finished { run, result } => {
+                // A run that was cancelled or begun again: the sheet has
+                // moved on, and this is not its report.
+                if run != self.generation {
+                    return;
+                }
                 self.running = false;
                 if let (Ok(_), Some((model, chars))) = (result.as_ref(), self.reading.take()) {
                     self.timings.keep(&model, self.pace.learned(chars));
@@ -264,8 +332,6 @@ impl SpeechPane {
                             studio.notify(&t("speech.voiceAddedTimeline"), false);
                         }
                     }
-                    // Asked for: the sheet is already on its way down.
-                    Err(error) if error.contains("cancel") => self.open = false,
                     Err(error) => self.message = error,
                 }
             }
@@ -281,7 +347,8 @@ impl SpeechPane {
             return;
         }
         let Some((model, megabytes)) = installed(&studio.settings.voices)
-            .get(self.model)
+            .iter()
+            .find(|model| model.id == self.model_id)
             .map(|model| (model.id.clone(), model.megabytes))
         else {
             self.message = t("speech.downloadVoiceModelFirst");
@@ -312,10 +379,7 @@ impl SpeechPane {
         } else {
             let Some(voice) = self.offered().get(self.voice).map(|speaker| speaker.id) else {
                 self.message = if self.family == Family::Chatterbox {
-                    t(
-                        "Chatterbox has no voice of its own: turn on Use sample voice, or \
-                         download Pocket TTS for its two recordings",
-                    )
+                    t("speech.chatterboxHasNoVoice")
                 } else {
                     t("speech.noVoiceRead")
                 };
@@ -379,19 +443,27 @@ impl SpeechPane {
         let speech = Arc::clone(&studio.host.speech);
         self.running = true;
         self.message.clear();
+        // This run's number: anything the last worker is still reporting is
+        // dropped by the update arms rather than landing in a sheet that
+        // has begun again.
+        self.generation = self.generation.wrapping_add(1);
+        let run = self.generation;
         let epoch = crate::host::project_epoch();
         spawn_in_project(
             move || {
                 let spoken = speech.speak(&dirs, &request, move |stage| {
                     on_ui_in_project(epoch, move |studio, _, _| {
-                        studio.handle(Msg::Speech(SpeechMsg::Progress(stage)));
+                        studio.handle(Msg::Speech(SpeechMsg::Progress { run, stage }));
                     });
                 })?;
                 let summary = media::probe(&spoken.path)?;
                 Ok::<_, String>(summary)
             },
-            |studio, _, _, result| {
-                studio.handle(Msg::Speech(SpeechMsg::Finished(Box::new(result))))
+            move |studio, _, _, result| {
+                studio.handle(Msg::Speech(SpeechMsg::Finished {
+                    run,
+                    result: Box::new(result),
+                }))
             },
         );
     }
@@ -584,7 +656,10 @@ impl SpeechPane {
             open: self.open,
             text: self.text.as_str().into(),
             voice: self.voice as i32,
-            model: self.model as i32,
+            model: installed(&studio.settings.voices)
+                .iter()
+                .position(|model| model.id == self.model_id)
+                .map_or(0, |index| index as i32),
             family: match self.family {
                 Family::Kokoro => 0,
                 Family::Pocket => 1,
@@ -624,9 +699,11 @@ impl SpeechPane {
 /// box reports it - with a space on whichever side is against a word, so
 /// `[laugh]` lands as a word of its own and never as the tail of one. An
 /// offset inside a character steps back to the character's start; one past
-/// the end is the end. A trailing space is always written when the tag is
-/// not already followed by one, so the caller can put the caret after it.
-pub fn insert_tag(text: &str, tag: &str, at: usize) -> String {
+/// the end is the end. Returns the new text and where the box's caret goes
+/// with it: past the tag and the space written beside it, which is not
+/// `at + tag.len() + 1` when the caret sat inside a word or against a space
+/// that was already there.
+pub fn insert_tag(text: &str, tag: &str, at: usize) -> (String, usize) {
     let mut at = at.min(text.len());
     while !text.is_char_boundary(at) {
         at -= 1;
@@ -642,7 +719,8 @@ pub fn insert_tag(text: &str, tag: &str, at: usize) -> String {
     } else {
         " "
     };
-    format!("{before}{lead}{tag}{trail}{after}")
+    let caret = before.len() + lead.len() + tag.len() + trail.len();
+    (format!("{before}{lead}{tag}{trail}{after}"), caret)
 }
 
 /// "af_heart" as a person would say it: the name, and the accent and
@@ -699,22 +777,47 @@ mod tests {
 
     /// A tag lands as a word of its own wherever the caret is: spaced off a
     /// word on either side, not doubled against a space already there, and
-    /// snapped to a character when the caret is reported inside one.
+    /// snapped to a character when the caret is reported inside one. The
+    /// caret that comes back sits after the tag and the space written with
+    /// it, which is where a person typing on wants it - not one past the
+    /// offset the caller passed, which landed inside a word or against an
+    /// existing space.
     #[test]
     fn a_tag_lands_as_its_own_word() {
-        assert_eq!(insert_tag("", "[laugh]", 0), "[laugh] ");
-        assert_eq!(insert_tag("hello", "[laugh]", 5), "hello [laugh] ");
-        assert_eq!(insert_tag("hello world", "[sigh]", 5), "hello [sigh] world");
-        assert_eq!(insert_tag("hello world", "[sigh]", 6), "hello [sigh] world");
+        assert_eq!(insert_tag("", "[laugh]", 0), ("[laugh] ".to_owned(), 8));
+        assert_eq!(
+            insert_tag("hello", "[laugh]", 5),
+            ("hello [laugh] ".to_owned(), 14)
+        );
+        assert_eq!(
+            insert_tag("hello world", "[sigh]", 5),
+            ("hello [sigh] world".to_owned(), 12)
+        );
+        assert_eq!(
+            insert_tag("hello world", "[sigh]", 6),
+            ("hello [sigh] world".to_owned(), 13)
+        );
         assert_eq!(
             insert_tag("hello world", "[sigh]", 3),
-            "hel [sigh] lo world"
+            ("hel [sigh] lo world".to_owned(), 11)
         );
-        assert_eq!(insert_tag("hi", "[chuckle]", 0), "[chuckle] hi");
+        assert_eq!(
+            insert_tag("hi", "[chuckle]", 0),
+            ("[chuckle] hi".to_owned(), 10)
+        );
         // Past the end is the end; inside "é" (two bytes) steps back to it.
-        assert_eq!(insert_tag("hi", "[laugh]", 40), "hi [laugh] ");
-        assert_eq!(insert_tag("café", "[laugh]", 4), "caf [laugh] é");
-        assert_eq!(insert_tag("café ", "[laugh]", 6), "café [laugh] ");
+        assert_eq!(
+            insert_tag("hi", "[laugh]", 40),
+            ("hi [laugh] ".to_owned(), 11)
+        );
+        assert_eq!(
+            insert_tag("café", "[laugh]", 4),
+            ("caf [laugh] é".to_owned(), 12)
+        );
+        assert_eq!(
+            insert_tag("café ", "[laugh]", 6),
+            ("café [laugh] ".to_owned(), 14)
+        );
     }
 
     #[test]

@@ -82,7 +82,7 @@ pub fn activity(msg: &Msg) -> Option<Activity> {
         )
         | Msg::Export(ExportMsg::Progress { .. })
         | Msg::Captions(CaptionsMsg::Progress(_))
-        | Msg::Speech(SpeechMsg::Progress(_))
+        | Msg::Speech(SpeechMsg::Progress { .. })
         | Msg::Settings(SettingsMsg::ModelProgress { .. } | SettingsMsg::InstallProgress { .. }) => {
             return None;
         }
@@ -115,7 +115,7 @@ pub fn activity(msg: &Msg) -> Option<Activity> {
         Msg::Speech(SpeechMsg::Begin) => {
             return Some(Activity::once(Info, "speech: started".to_owned()));
         }
-        Msg::Speech(SpeechMsg::Finished(result)) => {
+        Msg::Speech(SpeechMsg::Finished { result, .. }) => {
             return Some(Activity::once(
                 Info,
                 match result.as_ref() {

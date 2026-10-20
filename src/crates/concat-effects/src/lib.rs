@@ -332,7 +332,10 @@ mod tests {
     fn built_in_ids_are_namespaced_and_bare_aliases_still_resolve() {
         let catalogue = Catalogue::builtin();
         for package in catalogue.packages() {
-            assert!(package.id().starts_with("concat."), "{}", package.id());
+            // A namespace - `concat.` for the built-ins, the author's own
+            // for the packages compiled in from their folders
+            // (`lab.halation`). A bare id is a defect.
+            assert!(package.id().contains('.'), "{}", package.id());
         }
         assert_eq!(catalogue.get("glow").map(Package::id), Some("concat.glow"));
         assert_eq!(

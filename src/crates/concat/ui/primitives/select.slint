@@ -19,6 +19,18 @@ export component Select inherits Rectangle {
     /// the list to compare.
     in property <[string]> details;
     in-out property <int> current;
+    /// The row the model says is chosen, for a caller whose model can move
+    /// under the control. A press assigns `current` and ends the caller's
+    /// binding to it, so the trigger would keep showing the press whatever
+    /// the model said next; point this at the model and the control puts
+    /// `current` back to it whenever it moves. Left at -1, `current` is
+    /// the caller's alone.
+    in property <int> shown: -1;
+    changed shown => {
+        if (root.shown >= 0) {
+            root.current = root.shown;
+        }
+    }
     in property <string> placeholder: "Select";
     /// leading adornment on the trigger
     in property <Glyph> glyph: Glyph.none;

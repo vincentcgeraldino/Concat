@@ -383,6 +383,7 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
         editor.set_transition_groups(ModelRc::from(models.transition_groups.clone()));
         editor.set_applied_visual(ModelRc::from(models.applied_visual.clone()));
         editor.set_applied_audio(ModelRc::from(models.applied_audio.clone()));
+        editor.set_promoted_audio(ModelRc::from(models.promoted_audio.clone()));
         editor.set_visual_params(ModelRc::from(models.visual_params.clone()));
         editor.set_audio_params(ModelRc::from(models.audio_params.clone()));
         editor.set_adjust_params(ModelRc::from(models.adjust_params.clone()));
@@ -1035,6 +1036,9 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
     }));
     editor.on_clip_volume(on_lanes!(|state, id: SharedString, gain: f32| {
         state.clip_volume(&id, gain);
+    }));
+    editor.on_clip_fade(on_lanes!(|state, id: SharedString, side: i32, seconds: f32| {
+        state.clip_fade(&id, side, seconds);
     }));
     editor.on_save_frame(on_window!(|state| {
         state.save_frame_as();
@@ -1744,9 +1748,16 @@ fn start(project: Option<std::path::PathBuf>, smoke: bool) -> Result<(), slint::
         state.handle(Msg::Speech(SpeechMsg::SampleChanged(index)));
     }));
     // A string cut, and nothing of the window's: the sheet keeps the text,
-    // Rust only knows where a character starts.
+    // Rust only knows where a character starts - and where the caret lands
+    // once the tag and its space are in, which depends on what sat beside
+    // the caret.
     app.on_speech_insert_tag(|text: SharedString, tag: SharedString, at: i32| {
-        panes::speech::insert_tag(text.as_str(), tag.as_str(), at.max(0) as usize).into()
+        let (text, caret) =
+            panes::speech::insert_tag(text.as_str(), tag.as_str(), at.max(0) as usize);
+        ui::TagInsert {
+            text: text.into(),
+            caret: caret as i32,
+        }
     });
     app.on_speech_begin(on_window!(|state| {
         state.handle(Msg::Speech(SpeechMsg::Begin));
