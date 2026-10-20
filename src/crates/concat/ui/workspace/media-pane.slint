@@ -2437,7 +2437,7 @@ export component MediaPane inherits Rectangle {
 
                             Text {
                                 horizontal-stretch: 1;
-                                text: "\{root.selected-count} selected";
+                                text: I18n.t1("mediaPane.selectedCount", "\{root.selected-count}");
                                 color: Theme.fg-muted;
                                 font-size: Theme.fs-sm;
                                 vertical-alignment: center;

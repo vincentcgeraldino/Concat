@@ -313,6 +313,7 @@ pub(super) fn apply(
             };
             let curve = curve.filter(|points| crate::speed::curve_of(points).is_some());
             let source_covered = clip.duration * clip.speed;
+            let old_end = clip.start + clip.duration;
             let mean = curve
                 .as_ref()
                 .map(|points| crate::speed::mean_of(points))
@@ -324,6 +325,26 @@ pub(super) fn apply(
                     &mut clip.duration,
                     (source_covered / mean).max(MIN_CLIP_DURATION),
                 );
+            // Slowed down, the clip grows into what follows it, and the
+            // clips that follow move along by the growth - as
+            // `SetClipSpeed` does. A curve changes the rate by the same
+            // rule, so the lane moves for it too: without this the grown
+            // clip sat on top of the one beside it.
+            //
+            // Only the ones that start at or after the old end: a clip
+            // that already overlaps this one is not the lane's business
+            // here, and the same is true of the rate change beside it.
+            let (track_id, start, duration) = (clip.track_id.clone(), clip.start, clip.duration);
+            let grow = start + duration - old_end;
+            if grow > 0.0 && !timeline.is_free(&track_id, start, duration, &[&clip_id]) {
+                for other in timeline.clips_where(|other| {
+                    other.id != clip_id
+                        && other.track_id == track_id
+                        && other.start >= old_end - crate::placement::TOUCH
+                }) {
+                    other.start += grow;
+                }
+            }
             Ok(Outcome {
                 created_id: None,
                 applied,

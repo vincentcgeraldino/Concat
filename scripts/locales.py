@@ -53,7 +53,15 @@ I18N = CRATE / "src" / "i18n.rs"
 DOCS = ROOT / "docs"
 
 # A Rust or Slint string literal, with its escapes.
-LITERAL = r'"((?:[^"\\]|\\.)*)"'
+#
+# The escape is `\` and any one character, newline included: a Rust string
+# may be continued on the next line with a backslash, and that literal has
+# to be read as one. The old `.` stopped at the newline, so a continued
+# literal matched only where the file's line endings put a carriage return
+# between the backslash and the newline - a Windows checkout and not a
+# Linux one. The gate then passed a call it should have refused, because
+# the call was not seen at all.
+LITERAL = r'"((?:[^"\\]|\\[\s\S])*)"'
 SLINT_CALL = re.compile(r"I18n\.(?:t[12]?|upper)\(\s*" + LITERAL)
 RUST_CALL = re.compile(r"(?<![A-Za-z_])(?:i18n::)?tf?\(\s*" + LITERAL)
 KEY = re.compile(r"^[a-z][A-Za-z0-9]*(\.[a-z][A-Za-z0-9]*)+$")

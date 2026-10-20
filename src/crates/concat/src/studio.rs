@@ -533,6 +533,44 @@ pub enum Gesture {
     },
 }
 
+/// The clips a stage gesture touched, and whose echo therefore holds the
+/// edit it made: the ones the stage turns into commands when the gesture
+/// ends.
+///
+/// None for a gesture the stage does not own: a lane gesture is still
+/// live, and the stage must leave it alone.
+///
+/// Every stage gesture has to be in this list, and the match says so
+/// exhaustively - a wildcard arm is what hid the title's height grip,
+/// which fell through to the arm below, put the gesture back and returned
+/// before the echo was taken. The edit it had made was written to the
+/// echo and then dropped, and the title snapped back to its old box on
+/// every release. A new gesture that is not classified here is a
+/// compile error, not a bug someone finds later.
+fn gesture_clips(gesture: &Gesture) -> Option<Vec<String>> {
+    let one = |clip: &str| Some(vec![clip.to_owned()]);
+    match gesture {
+        Gesture::StageMove { origins, .. } => {
+            Some(origins.iter().map(|origin| origin.clip.clone()).collect())
+        }
+        Gesture::StageScale { clip, .. }
+        | Gesture::StageRotate { clip, .. }
+        | Gesture::StageStretch { clip, .. }
+        | Gesture::StageMask { clip, .. }
+        | Gesture::TextWidth { clip, .. }
+        | Gesture::TextHeight { clip, .. } => one(clip),
+        // Not ours to end; a lane gesture is still live.
+        Gesture::None
+        | Gesture::Move { .. }
+        | Gesture::Trim { .. }
+        | Gesture::TransitionResize { .. } => None,
+        // A stroke is the stage's, but it ends as a command of its own
+        // rather than as a transform - `stage_released` deals with it
+        // before it comes here.
+        Gesture::Paint { .. } => None,
+    }
+}
+
 /// The custom cutout's brushes, in the inspector's order.
 pub const BRUSHES: [model::BrushTool; 4] = [
     model::BrushTool::SmartBrush,
@@ -4069,7 +4107,7 @@ impl Studio {
             return;
         }
         if !video && clip.kind == model::ClipKind::Image {
-            self.notify("A still has no sound to filter", true);
+            self.notify(&t("studio.stillHasNoSound"), true);
             return;
         }
         let entry = AppliedFilter::new(id);
@@ -6272,45 +6310,36 @@ impl Studio {
             .then(|| self.stroke_overlay())
             .filter(|(path, _, _)| !path.is_empty());
         let gesture = std::mem::replace(&mut self.gesture, Gesture::None);
-        let touched: Vec<String> = match gesture {
-            Gesture::StageMove { origins, .. } => {
-                origins.into_iter().map(|origin| origin.clip).collect()
-            }
-            Gesture::StageScale { clip, .. }
-            | Gesture::StageRotate { clip, .. }
-            | Gesture::StageStretch { clip, .. }
-            | Gesture::StageMask { clip, .. }
-            | Gesture::TextWidth { clip, .. } => vec![clip],
-            Gesture::Paint {
-                clip,
-                tool,
-                size,
-                at,
-                points,
-                ..
-            } => {
-                // The stroke becomes one command, and one undo step; a
-                // smart stroke then has its thing read from the frame, and
-                // stays drawn until it has been.
-                let stroke = model::Stroke {
-                    tool,
-                    size,
-                    points: points.clone(),
-                    at: Some(at),
-                };
-                self.pending_stroke = stroke.is_smart().then_some(overlay).flatten();
-                self.apply(Command::AddCutoutStroke {
-                    clip_id: clip,
-                    stroke,
-                });
-                self.ensure_regions();
-                return;
-            }
-            other => {
-                // Not ours to end; a lane gesture is still live.
-                self.gesture = other;
-                return;
-            }
+        if let Gesture::Paint {
+            clip,
+            tool,
+            size,
+            at,
+            points,
+            ..
+        } = &gesture
+        {
+            // The stroke becomes one command, and one undo step; a
+            // smart stroke then has its thing read from the frame, and
+            // stays drawn until it has been.
+            let stroke = model::Stroke {
+                tool: *tool,
+                size: *size,
+                points: points.clone(),
+                at: Some(*at),
+            };
+            self.pending_stroke = stroke.is_smart().then_some(overlay).flatten();
+            self.apply(Command::AddCutoutStroke {
+                clip_id: clip.clone(),
+                stroke,
+            });
+            self.ensure_regions();
+            return;
+        }
+        let Some(touched) = gesture_clips(&gesture) else {
+            // Not ours to end; a lane gesture is still live.
+            self.gesture = gesture;
+            return;
         };
         let Some(echo) = self.echo.take() else {
             return;
@@ -7758,7 +7787,7 @@ impl Studio {
                     && at < clip.start + clip.duration - edge
             });
         let Some(clip) = target else {
-            self.notify("Park the playhead inside a picture clip to freeze", true);
+            self.notify(&t("studio.parkPlayheadInsidePicture"), true);
             return;
         };
 
@@ -8317,6 +8346,14 @@ impl Studio {
         self.host.stabilizers.cancel();
         self.host.enhancers.cancel();
         self.host.reversers.cancel();
+        // These three hold a slot of their own, and the slot refuses a
+        // second job while it is held: a transcription or a read left
+        // running when the project closed kept the slot, and the next
+        // project was told a transcription was already running while its
+        // own sheet showed nothing.
+        self.host.transcriber.cancel();
+        self.host.speech.cancel();
+        self.host.brushes.cancel();
         self.enhance_jobs.clear();
         self.enhance_preview = None;
         self.enhance_previewing = None;
@@ -12090,6 +12127,104 @@ mod tests {
                 .iter()
                 .all(Option::is_none)
         );
+    }
+
+    /// Every stage gesture ends with the stage and hands its edit over. A
+    /// gesture that is not in the list ends at the arm that puts it back
+    /// and returns before the echo is taken - so the edit it made was
+    /// written to the echo and then dropped, and the picture snapped back
+    /// to what the document said. The title's height grip was the one that
+    /// was missing, and its title snapped back to its old box on every
+    /// release.
+    #[test]
+    fn every_stage_gesture_ends_with_the_stage() {
+        use super::Gesture;
+        let clip = "c1".to_owned();
+        let centre = (0.0, 0.0);
+        let gestures = [
+            Gesture::StageScale {
+                clip: clip.clone(),
+                scale: 1.0,
+                centre,
+                from: 0.0,
+                half: (0.0, 0.0),
+            },
+            Gesture::StageRotate {
+                clip: clip.clone(),
+                rotation: 0.0,
+                centre,
+                from: 0.0,
+            },
+            Gesture::StageStretch {
+                clip: clip.clone(),
+                across: true,
+                stretch: 1.0,
+                centre,
+                from: 0.0,
+                rotation: 0.0,
+            },
+            Gesture::StageMask {
+                clip: clip.clone(),
+                grip: super::MaskGrip::Rotate,
+                frame: super::MaskFrame::new(
+                    concat_project::model::ClipMask::default(),
+                    &Footprint {
+                        cx: 0.5,
+                        cy: 0.5,
+                        w: 1.0,
+                        h: 1.0,
+                        rotation: 0.0,
+                    },
+                    (100, 100),
+                    (1.0, 1.0),
+                ),
+                from: (0.0, 0.0),
+            },
+            Gesture::TextWidth {
+                clip: clip.clone(),
+                centre,
+                rotation: 0.0,
+            },
+            // The one that was missing: the height of a title's box.
+            Gesture::TextHeight {
+                clip: clip.clone(),
+                centre,
+                rotation: 0.0,
+            },
+        ];
+        for gesture in &gestures {
+            let touched = super::gesture_clips(gesture)
+                .unwrap_or_else(|| panic!("{} is not a stage gesture", kind(gesture)));
+            assert_eq!(
+                touched,
+                vec![clip.clone()],
+                "{} did not name its clip",
+                kind(gesture)
+            );
+        }
+        // And a gesture that is not the stage's is left alone.
+        assert!(super::gesture_clips(&Gesture::None).is_none());
+        assert!(
+            super::gesture_clips(&Gesture::Move {
+                primary: "c1".to_owned(),
+                origins: Vec::new(),
+                lanes: Vec::new(),
+            })
+            .is_none()
+        );
+
+        /// The gesture's name, for the failure message.
+        fn kind(gesture: &Gesture) -> &'static str {
+            match gesture {
+                Gesture::StageScale { .. } => "a scale",
+                Gesture::StageRotate { .. } => "a rotation",
+                Gesture::StageStretch { .. } => "a stretch",
+                Gesture::StageMask { .. } => "a mask",
+                Gesture::TextWidth { .. } => "a text width",
+                Gesture::TextHeight { .. } => "a text height",
+                _ => "something else",
+            }
+        }
     }
 
     /// A copy of a split clip's tail, laid right after it, shows the

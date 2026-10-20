@@ -427,13 +427,14 @@ pub struct JobStatus {
     /// Running, or how it ended.
     pub state: JobState,
     /// What it is doing: "cutout" while masks are found, "stabilize" while
-    /// shake is measured, then "video",
-    /// "audio" and "mux". Absent until it has said.
+    /// shake is measured, then "rendering", "mixing audio" and "muxing" -
+    /// the words the engine itself says, so a caller that switches on them
+    /// switches on what it is given. Absent until it has said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
-    /// Frames rendered, in the video stage.
+    /// Frames rendered, in the rendering stage.
     pub frame: i64,
-    /// Frames in all, in the video stage; 0 until known.
+    /// Frames in all, in the rendering stage; 0 until known.
     pub total: i64,
     /// How far along the current stage is, `0..=1`; 1 once done.
     pub fraction: f64,
@@ -681,7 +682,8 @@ pub enum Event {
         frame: i64,
         /// Frames in total.
         total: i64,
-        /// "video", "audio" or "mux".
+        /// "cutout", "stabilize", "rendering", "mixing audio" or
+        /// "muxing" - the words the engine says.
         stage: String,
     },
     /// The export wrote its file. The job is over.

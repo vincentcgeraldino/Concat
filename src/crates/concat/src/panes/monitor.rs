@@ -10,7 +10,9 @@
 //! controller's to say, and the pane asks it for that list. A request
 //! while one is out waits for it, and the newest wins; a frame that
 //! could not be drawn says so once per project and then stops repeating
-//! itself.
+//! itself. The busy flag says which project the frame in flight belongs
+//! to, so a frame the closing of a project dropped does not hold the
+//! monitor up for the rest of the session.
 //!
 //! The stage's gestures - pressing, dragging and releasing a picture on
 //! the monitor - are not here: one [`crate::studio::Gesture`] spans the
@@ -76,7 +78,16 @@ pub enum Picture {
 pub struct MonitorPane {
     /// The last frame drawn.
     pub image: slint::Image,
-    busy: bool,
+    /// The project epoch the frame in flight belongs to, and None when no
+    /// frame is in flight.
+    ///
+    /// A frame asked for in a project that has since closed is not going
+    /// to arrive: its delivery is dropped with the project it belonged
+    /// to. The flag is the epoch rather than a plain one for that reason
+    /// - a plain one was left set for ever by the dropped delivery, and
+    /// the monitor asked for nothing again for the rest of the session,
+    /// in the next project too.
+    busy: Option<u64>,
     wanted: bool,
     /// Said once per project: a monitor that cannot decode says so, and
     /// then stops repeating itself.
@@ -145,7 +156,7 @@ impl MonitorPane {
         match msg {
             MonitorMsg::Request => self.request(studio),
             MonitorMsg::Frame(result, spec) => {
-                self.busy = false;
+                self.busy = None;
                 let fps = studio.project().active().video.rate();
                 let wait = self.asked.take().map(|at| at.elapsed()).unwrap_or_default();
                 if spec.moving && result.is_ok() {
@@ -195,8 +206,25 @@ impl MonitorPane {
                 self.quality.insert(id, (index.max(0) as usize).min(2));
                 self.request(studio);
             }
-            MonitorMsg::Opened => self.failed = false,
-            MonitorMsg::Closed => self.image = slint::Image::default(),
+            MonitorMsg::Opened => {
+                self.failed = false;
+                // A frame still in flight when the last project closed was
+                // dropped on delivery, and the drop is what would have
+                // cleared the busy flag. The epoch says so too - the frame
+                // belongs to a project that is no longer open - but the
+                // flag is cleared here as well, so the monitor is ready
+                // the moment the project is.
+                self.busy = None;
+                self.wanted = false;
+            }
+            MonitorMsg::Closed => {
+                self.image = slint::Image::default();
+                // The same, on the way out: the frame in flight is not going
+                // to arrive, so the busy flag it would have cleared goes
+                // with it.
+                self.busy = None;
+                self.wanted = false;
+            }
         }
     }
 
@@ -221,19 +249,45 @@ impl MonitorPane {
         (side(width), side(height))
     }
 
+    /// Whether the monitor may ask for a frame now, and takes the flag for
+    /// the one it asks for.
+    ///
+    /// Not while the frame in flight is still on its way - one at a time.
+    /// A frame asked for in a project that has since closed is not going
+    /// to arrive: its delivery is dropped with the project it belonged to.
+    /// The flag carries that project's epoch for that reason: a plain flag
+    /// was left set by the dropped delivery, and the monitor asked for
+    /// nothing again for the rest of the session - in the next project
+    /// too, which is where the person noticed.
+    ///
+    /// The epoch is a parameter, not the counter read here, so a test can
+    /// say which project it means without moving the counter every test
+    /// in this process shares.
+    fn may_ask(&mut self, epoch: u64) -> bool {
+        if self.busy == Some(epoch) {
+            self.wanted = true;
+            return false;
+        }
+        self.busy = Some(epoch);
+        self.wanted = false;
+        true
+    }
+
     /// Asks the engine for the frame at the playhead - or under the pointer,
     /// while the preview axis has it - one at a time.
     fn request(&mut self, studio: &mut Studio) {
         if studio.on_start || studio.session.is_none() {
             return;
         }
-        if self.busy {
-            self.wanted = true;
+        if !self.may_ask(crate::host::project_epoch()) {
             return;
         }
         let (width, height) =
             Self::frame_size(self.quality_of(studio.project()), studio.output_size());
         let Some((clips, settings)) = studio.preview_clips() else {
+            // Nothing to draw: the flag goes back, or the monitor would
+            // wait for a frame that was never asked for.
+            self.busy = None;
             return;
         };
         let quality = self.quality_of(studio.project());
@@ -255,8 +309,6 @@ impl MonitorPane {
             self.cadence.report(studio.project().active().video.rate());
         }
         let monitor = studio.host.monitor.clone();
-        self.busy = true;
-        self.wanted = false;
         self.asked = Some(std::time::Instant::now());
         spawn_frame(
             move || {
@@ -343,5 +395,27 @@ mod tests {
         assert_eq!(pane.quality_of(&project), 2);
         project.active_timeline_id = "b".to_owned();
         assert_eq!(pane.quality_of(&project), 1, "another timeline has its own");
+    }
+
+    /// A frame asked for in a project that has since closed is dropped on
+    /// delivery, and the monitor must not wait for it: the flag that says
+    /// a frame is in flight belonged to that project, and the next request
+    /// is for another. Waiting left the monitor blank for the rest of the
+    /// session - in the next project too, which is where the person
+    /// noticed.
+    #[test]
+    fn a_frame_left_over_from_a_closed_project_does_not_stall_the_monitor() {
+        let mut pane = MonitorPane::default();
+        // The first frame of the project that is open.
+        assert!(pane.may_ask(), "the first frame is asked for");
+        // The one in flight is waited for.
+        assert!(!pane.may_ask(), "the frame in flight is waited for");
+        assert!(pane.wanted, "and another is wanted for when it lands");
+        // The project closes: the frame in flight is dropped on delivery.
+        crate::host::next_project_epoch();
+        assert!(
+            pane.may_ask(),
+            "the monitor asks again, in the project that is open now"
+        );
     }
 }

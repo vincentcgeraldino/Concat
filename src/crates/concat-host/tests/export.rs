@@ -697,6 +697,74 @@ fn one_clip_exports_whole_at_every_rate() {
     }
 }
 
+/// A clip trimmed past the end of its media is still on the timeline, and
+/// the honest picture for any time past the end is the last frame. The
+/// pool answers with it, the preview shows it, and the paused monitor is
+/// tested for it - but the export's own decoder ran out, dropped the
+/// clip's layer, and drew black where the monitor drew the picture. The
+/// export and the monitor must not draw the same cut two ways.
+#[test]
+fn a_clip_past_the_end_of_its_media_holds_its_last_frame() {
+    let scratch = Scratch::new("past-end");
+    let sources = Sources::make(scratch.path());
+    let mut studio = Studio::new(scratch.path(), "PastEnd", video(WIDTH, HEIGHT, 30, 1));
+    // Three seconds of silent footage, 24 fps.
+    let silent = studio.import(&sources.silent);
+    let clip = studio
+        .apply(Command::AddClipAtFirstFree {
+            media_id: silent,
+            start: 0.0,
+        })
+        .expect("the clip has an id");
+    // Two seconds longer than the file: the clip outlives its media.
+    studio.apply(Command::TrimClip {
+        clip_id: clip.clone(),
+        edge: TrimEdge::End,
+        delta: 2.0,
+        ripple: false,
+    });
+    let duration = studio.clip(&clip).duration;
+    assert!(
+        duration > 3.0,
+        "the clip should be longer than the file it was cut from"
+    );
+
+    let exported = studio.export("past the end");
+    exported.expect_length(duration);
+    exported.expect_no_sound();
+    // The last second of the file, while the file is still playing.
+    exported.expect_second(2.5, 2);
+    // And after it: the last frame, held - not a black gap where the
+    // picture was.
+    exported.expect_second(3.5, 2);
+    exported.expect_second(4.9, 2);
+}
+
+/// A clip whose media ends exactly where the clip does, exported at twice
+/// the media's rate: the last output frame is the last source frame, not
+/// the black the decoder left there. The frame before it needed a source
+/// frame that did not exist, and the last one was held in its place.
+#[test]
+fn a_clip_whose_media_ends_with_it_keeps_its_last_frame() {
+    let scratch = Scratch::new("exact-end");
+    let sources = Sources::make(scratch.path());
+    let mut studio = Studio::new(scratch.path(), "ExactEnd", video(WIDTH, HEIGHT, 30, 1));
+    // The camera: four seconds at 30 fps, with sound.
+    let cam = studio.import(&sources.cam);
+    studio
+        .apply(Command::AddClipAtFirstFree {
+            media_id: cam,
+            start: 0.0,
+        })
+        .expect("the clip has an id");
+    let duration = studio.end();
+    // Twice the rate the media was shot at: every source frame is wanted
+    // twice, and the last one has to hold.
+    let exported = studio.export_at("exact end at twice the rate", Some((60, 1)));
+    exported.expect_length(duration);
+    exported.expect_second(duration - 0.01, 3);
+}
+
 /// Issue #202: on Windows laptops with NVIDIA chips an export took the app
 /// down at its first frame, with nothing in the log. The export had opened
 /// a device of its own through every API wgpu was built with, where the
@@ -1942,7 +2010,11 @@ fn the_edges_export_too() {
     exported.expect_sound(end);
     exported.expect_black(start - 0.5);
     exported.expect_second(start + 0.5, 3);
-    exported.expect_second(end - 0.5, 3);
+    // The very last frame, not half a second before it: the decoders reach
+    // the end of the file long before the clip ends, and the picture from
+    // there on is the last frame the file had. Asserted right at the end,
+    // because a gap of half a second is where a black tail hides.
+    exported.expect_second(end - 0.01, 3);
     exported.expect_tone(start + 4.0);
 }
 

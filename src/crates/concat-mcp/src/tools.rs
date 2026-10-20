@@ -33,7 +33,12 @@ const POLL: Duration = Duration::from_millis(250);
 const WAIT_DEFAULT: f64 = 60.0;
 const WAIT_LONGEST: f64 = 600.0;
 /// The stages of an export in order, for one progress figure across them.
-const STAGES: [&str; 5] = ["cutout", "stabilize", "video", "audio", "mux"];
+///
+/// The words are the engine's own: the table here has to name what the
+/// stage is called, or the progress it works out is always the first
+/// stage's share - and the render, the longest stage, reports nothing at
+/// all.
+const STAGES: [&str; 5] = ["cutout", "stabilize", "rendering", "mixing audio", "muxing"];
 
 /// What a tool does with its arguments.
 #[derive(Clone, Copy, Debug)]
@@ -420,7 +425,7 @@ pub fn catalogue() -> Vec<Tool> {
         method(
             "export_status",
             "Export status",
-            "How an export job stands, at once: `state` (\"running\", \"done\", \"cancelled\" or \"failed\"), `stage` (\"cutout\", \"stabilize\", \"video\", \"audio\", \"mux\"), frames done of total, `fraction` of the stage (0-1), and once done the file and its size, or the error.",
+            "How an export job stands, at once: `state` (\"running\", \"done\", \"cancelled\" or \"failed\"), `stage` (\"cutout\", \"stabilize\", \"rendering\", \"mixing audio\", \"muxing\"), frames done of total, `fraction` of the stage (0-1), and once done the file and its size, or the error.",
             "export.status",
             Raw,
         )

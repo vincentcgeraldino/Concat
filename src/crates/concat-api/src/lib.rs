@@ -453,6 +453,12 @@ impl Api {
                 Ok(Reply::Done(Done {}))
             }
             Request::ProjectSetVideo { path, video } => {
+                // A frame that could not be is refused here, not written
+                // and forgotten: the command layer treats it as an edit
+                // that did not happen, and the caller would have been told
+                // it had.
+                checked_size(video.width, video.height)?;
+                checked_rate(video.rate_num, video.rate_den)?;
                 view(self.session_mut(&path)?.set_video(video).map_err(refused)?)
             }
             Request::EditApply { path, command } => view(self.apply(&path, *command)?),
@@ -520,11 +526,17 @@ impl Api {
         video: VideoSettings,
     ) -> Result<EditorView, ApiError> {
         self.writable(location)?;
+        // A frame the engine could not have is refused before the folder
+        // is made. Written, it would be a project that `project.open` and
+        // the window both refuse for ever: the rate is in the manifest,
+        // and the manifest is read before the document.
+        let (width, height) = checked_size(video.width, video.height)?;
+        checked_rate(video.rate_num, video.rate_den)?;
         let info = projects::create(
             location,
             name,
-            video.width,
-            video.height,
+            width,
+            height,
             video.rate_num,
             video.rate_den,
         )
@@ -1093,6 +1105,16 @@ fn checked_rate(num: i64, den: i64) -> Result<(), ApiError> {
         return Err(ApiError::invalid(
             "A frame rate needs a positive numerator and denominator",
         ));
+    }
+    // The engine's own rule, and the one the document and the export
+    // hold to: the terms, in lowest terms, must fit the frame
+    // arithmetic. A rate past it is one the command layer drops without
+    // a word and the export refuses - so accepting it here would leave
+    // a project nothing can render, and tell the caller it was made.
+    if concat_core::time::FrameRate::checked(num, den).is_none() {
+        return Err(ApiError::invalid(format!(
+            "{num}/{den} is not a frame rate a video can have"
+        )));
     }
     if num as f64 / den as f64 > MAX_RATE {
         return Err(ApiError::invalid(format!(

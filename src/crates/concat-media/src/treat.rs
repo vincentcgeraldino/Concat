@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use concat_core::frame::Frame;
+use concat_core::frame::{Depth, Frame};
 use ffmpeg_the_third as ffmpeg;
 use ffmpeg_the_third::filter;
 use ffmpeg_the_third::format::Pixel;
@@ -93,6 +93,17 @@ thread_local! {
 /// One RGBA picture in, `spec` - a whole filtergraph, ending in the size
 /// and format the caller wants out - and one RGBA picture out.
 fn run(frame: &Frame, spec: &str) -> Result<Frame> {
+    // The graph works in eight bits a channel, and a deep frame's pixels
+    // are eight bytes each: read as four they would be half as many
+    // pixels and half as wide a row, and the picture would come apart.
+    // Said before the graph is built, so a deep frame does not pay for a
+    // filtergraph that is about to be thrown away.
+    if frame.depth() != Depth::Eight {
+        return Err(Error::UnsupportedFrame {
+            path: Path::new("layer").to_path_buf(),
+            detail: "a deep frame cannot go through an eight-bit filter chain".to_owned(),
+        });
+    }
     ffi::init();
     let key = (spec.to_owned(), frame.width(), frame.height());
     let cached = GRAPHS.with(|graphs| {
@@ -168,7 +179,6 @@ fn build(spec: &str, width: u32, height: u32) -> Result<filter::Graph> {
 fn pass(graph: &mut filter::Graph, frame: &Frame) -> Result<Frame> {
     let path = Path::new("layer");
     let (source_w, source_h) = (frame.width(), frame.height());
-
     // The picture, as a padded FFmpeg frame.
     let mut source = Video::new(Pixel::RGBA, source_w, source_h);
     {

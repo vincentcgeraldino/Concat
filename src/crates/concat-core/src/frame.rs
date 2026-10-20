@@ -14,10 +14,11 @@
 //! makes one only when a caller asks (`DecodeOptions::deep`) and the source
 //! is wide, and the only caller that asks is the one whose frames go
 //! straight to the GPU, which brings them into its working space as it
-//! uploads them. Nothing else ever sees one, so no call site branches on
-//! the depth: the note that once said a deeper frame would arrive as a
-//! type of its own gave way to that, since a second type would have run
-//! through the frame pool, the plan and every cache for one reader.
+//! uploads them. A second type would have run through the frame pool, the
+//! plan and every cache for one reader, so a deep frame is the same type
+//! as any other and the accessors below know its depth: a frame is read
+//! and written whole, and the operations that work in eight bits a channel
+//! - the filter chain, a copy between depths - say so rather than guess.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,11 +66,15 @@ fn mint() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// An RGBA8 image.
+/// An RGBA8 image - or an RGBA16 one, for a deep frame.
 ///
 /// Width and height are fixed at construction, and the buffer is always
-/// exactly `width * height * 4` bytes, so indexing arithmetic cannot go wrong
-/// after the fact.
+/// exactly `width * height` pixels of the frame's own depth - four bytes
+/// each, or eight for a deep one - so indexing arithmetic cannot go wrong
+/// after the fact. The accessors below read the frame's own depth, not a
+/// fixed four bytes a pixel: an offset for four would land in the middle
+/// of a deep picture, and a write there would take half of a pixel with
+/// it.
 pub struct Frame {
     width: u32,
     height: u32,
@@ -119,7 +124,8 @@ impl Frame {
         self.id
     }
 
-    /// How many bytes a frame of this size occupies.
+    /// How many bytes a frame of this size occupies, eight bits a channel.
+    /// A deep frame is twice that; see [`Frame::bytes_per_pixel`].
     pub const fn byte_len(width: u32, height: u32) -> usize {
         width as usize * height as usize * BYTES_PER_PIXEL
     }
@@ -232,11 +238,15 @@ impl Frame {
     }
 
     /// Byte offset of the pixel at `(x, y)`, or `None` if out of bounds.
+    ///
+    /// The frame's own depth: a deep frame's pixels are eight bytes each,
+    /// and an offset computed for four would land in the middle of the
+    /// picture.
     pub const fn offset_of(&self, x: u32, y: u32) -> Option<usize> {
         if x >= self.width || y >= self.height {
             return None;
         }
-        Some((y as usize * self.width as usize + x as usize) * BYTES_PER_PIXEL)
+        Some((y as usize * self.width as usize + x as usize) * self.bytes_per_pixel())
     }
 
     /// Reads one pixel as `[r, g, b, a]`: a deep frame's to eight bits, its
@@ -250,29 +260,61 @@ impl Frame {
                 self.pixels[offset + 2],
                 self.pixels[offset + 3],
             ],
-            Depth::Sixteen => {
-                let at = offset * 2;
-                [
-                    self.pixels[at + 1],
-                    self.pixels[at + 3],
-                    self.pixels[at + 5],
-                    self.pixels[at + 7],
-                ]
-            }
+            Depth::Sixteen => [
+                self.pixels[offset + 1],
+                self.pixels[offset + 3],
+                self.pixels[offset + 5],
+                self.pixels[offset + 7],
+            ],
         })
     }
 
     /// Writes one pixel. Out-of-bounds writes are ignored.
+    ///
+    /// The colour is eight bits a channel: a deep frame takes it as such
+    /// and spreads it over sixteen, so that reading the pixel back gives
+    /// the same four numbers again.
+    ///
+    /// The spread is of *code values*, not of light. A deep frame holds
+    /// its own transfer function - PQ, HLG - and `255` in it is that
+    /// function's maximum code, not white; and a deep frame can hold
+    /// values above 1.0 that this signature cannot express at all. So
+    /// the write is only meaningful for a frame in a linear signal, and
+    /// [`Frame::pixel`] reads a deep frame back truncated to its high
+    /// byte.
     pub fn set_pixel(&mut self, x: u32, y: u32, rgba: [u8; 4]) {
         self.id = mint();
-        if let Some(offset) = self.offset_of(x, y) {
-            self.pixels[offset..offset + BYTES_PER_PIXEL].copy_from_slice(&rgba);
+        let Some(offset) = self.offset_of(x, y) else {
+            return;
+        };
+        match self.depth {
+            Depth::Eight => {
+                self.pixels[offset..offset + BYTES_PER_PIXEL].copy_from_slice(&rgba);
+            }
+            Depth::Sixteen => {
+                // Eight bits a channel spread over sixteen: the value a
+                // channel of `v / 255` takes in sixteen bits, so the high
+                // byte - the one `pixel` reads - is `v` again.
+                for (index, channel) in rgba.iter().enumerate() {
+                    let wide = u16::from(*channel) * 257;
+                    let at = offset + index * 2;
+                    self.pixels[at] = (wide & 0xff) as u8;
+                    self.pixels[at + 1] = (wide >> 8) as u8;
+                }
+            }
         }
     }
 
     /// Copies `source` into this frame with its top-left corner at (`x`, `y`),
     /// clipping whatever falls outside. No blending: the source's pixels
     /// replace what was there.
+    ///
+    /// A source of another depth is not copied at all. The two depths are
+    /// not two sizes of the same colour: a deep frame holds code values
+    /// in its own transfer function - PQ, HLG - and there is no spreading
+    /// of an eight-bit number that means the same thing there. Copying
+    /// one into the other would hand the caller a picture that looks
+    /// right and is not, so the copy is refused instead.
     pub fn blit(&mut self, source: &Frame, x: u32, y: u32) {
         self.id = mint();
         let width = self.width;
@@ -282,28 +324,49 @@ impl Frame {
         if columns == 0 || rows == 0 {
             return;
         }
-        let source_row = source.width as usize * 4;
-        let target_row = width as usize * 4;
+        if source.depth != self.depth {
+            return;
+        }
+        let source_row = source.width as usize * source.bytes_per_pixel();
+        let target_bytes = self.bytes_per_pixel();
+        let target_row = width as usize * target_bytes;
+        let row_bytes = columns * target_bytes;
         for row in 0..rows {
             let from = row * source_row;
-            let to = (y as usize + row) * target_row + x as usize * 4;
-            self.pixels[to..to + columns * 4]
-                .copy_from_slice(&source.pixels[from..from + columns * 4]);
+            let to = (y as usize + row) * target_row + x as usize * target_bytes;
+            self.pixels[to..to + row_bytes].copy_from_slice(&source.pixels[from..from + row_bytes]);
         }
     }
 
     /// Fills the whole frame with one colour.
     pub fn fill(&mut self, rgba: [u8; 4]) {
         self.id = mint();
-        for pixel in self.pixels.chunks_exact_mut(BYTES_PER_PIXEL) {
-            pixel.copy_from_slice(&rgba);
+        // The frame's own depth, hoisted: the arm below borrows the pixels
+        // mutably, and the borrow of the whole frame would not live with it.
+        let bytes = self.bytes_per_pixel();
+        match self.depth {
+            Depth::Eight => {
+                for pixel in self.pixels.chunks_exact_mut(BYTES_PER_PIXEL) {
+                    pixel.copy_from_slice(&rgba);
+                }
+            }
+            Depth::Sixteen => {
+                for pixel in self.pixels.chunks_exact_mut(bytes) {
+                    for (index, channel) in rgba.iter().enumerate() {
+                        let wide = u16::from(*channel) * 257;
+                        pixel[index * 2] = (wide & 0xff) as u8;
+                        pixel[index * 2 + 1] = (wide >> 8) as u8;
+                    }
+                }
+            }
         }
     }
 
-    /// Iterates over rows, top to bottom.
+    /// Iterates over rows, top to bottom. A frame with no width has no
+    /// rows, and yields none.
     pub fn rows(&self) -> impl Iterator<Item = &[u8]> {
-        self.pixels
-            .chunks_exact(self.width as usize * BYTES_PER_PIXEL)
+        let row = self.width as usize * self.bytes_per_pixel();
+        self.pixels.chunks_exact(row.max(1))
     }
 }
 
@@ -363,5 +426,42 @@ mod tests {
         let frame = Frame::black(5, 4);
         assert_eq!(frame.rows().count(), 4);
         assert!(frame.rows().all(|row| row.len() == 20));
+    }
+
+    /// A deep frame's pixels are eight bytes each, and every accessor has
+    /// to know it: an offset computed for four bytes a pixel lands in the
+    /// middle of the picture, and a write there takes half of a pixel
+    /// with it - the frame reads back as a darkened, half-written one.
+    #[test]
+    fn a_deep_frame_is_read_and_written_in_its_own_depth() {
+        let mut frame = Frame::from_rgba64(3, 2, vec![0; 3 * 2 * 8], Signal::Hlg)
+            .expect("a deep frame of the right size");
+        assert_eq!(frame.bytes_per_pixel(), 8);
+        // The rows are the frame's own rows, and not twice as many.
+        assert_eq!(frame.rows().count(), 2);
+        assert!(frame.rows().all(|row| row.len() == 3 * 8));
+        // A pixel set and read back is the one that was set.
+        frame.set_pixel(2, 1, [10, 20, 30, 40]);
+        assert_eq!(frame.pixel(2, 1), Some([10, 20, 30, 40]));
+        // And the pixel beside it is untouched: the write did not take
+        // half of it with it.
+        assert_eq!(frame.pixel(1, 1), Some([0, 0, 0, 0]));
+        // A fill reaches every channel, alpha among them.
+        frame.fill([1, 2, 3, 4]);
+        assert_eq!(frame.pixel(0, 0), Some([1, 2, 3, 4]));
+        assert_eq!(frame.pixel(2, 1), Some([1, 2, 3, 4]));
+    }
+
+    /// A copy of a deep frame lands in the deep frame's own pixels.
+    #[test]
+    fn a_deep_frame_is_copied_whole() {
+        let mut source = Frame::from_rgba64(2, 2, vec![0; 2 * 2 * 8], Signal::Hlg)
+            .expect("a deep frame of the right size");
+        source.set_pixel(1, 1, [7, 8, 9, 10]);
+        let mut target = Frame::from_rgba64(4, 4, vec![0; 4 * 4 * 8], Signal::Hlg)
+            .expect("a deep frame of the right size");
+        target.blit(&source, 2, 2);
+        assert_eq!(target.pixel(3, 3), Some([7, 8, 9, 10]));
+        assert_eq!(target.pixel(2, 2), Some([0, 0, 0, 0]));
     }
 }

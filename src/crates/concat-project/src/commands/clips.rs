@@ -31,6 +31,11 @@ pub(super) fn apply(
             }
             // Magnetic, the lane makes room; otherwise the clip takes the
             // nearest gap it fits, never the top of another clip.
+            // The position is floored at zero before the lane is looked at:
+            // a span before the timeline's start covers nothing, so the
+            // lane would read as free and the clip - placed at zero, as
+            // `Clip::blank` has it - would land on top of what is there.
+            let start = start.max(0.0);
             let start = if ripple {
                 ripple_room_for(timeline, &track_id, start, &media)
             } else {
@@ -53,6 +58,12 @@ pub(super) fn apply(
                 .clone();
             let duration = clip_length(&media);
             let timeline = project.active_mut();
+            // Floored at zero, as the command's own contract says, and
+            // before the lane is chosen: a span before the timeline's
+            // start covers nothing, so every lane would read as free and
+            // the clip - placed at zero, as `Clip::blank` has it - would
+            // land on top of what is there.
+            let start = start.max(0.0);
             let track_id = first_free_track(timeline, start, duration)
                 .unwrap_or_else(|| fresh_track(timeline, mint));
             let id = mint.next("c");
@@ -131,6 +142,10 @@ pub(super) fn apply(
             let duration = duration
                 .unwrap_or(DEFAULT_TEXT_DURATION)
                 .max(MIN_CLIP_DURATION);
+            // Floored at zero before the lane is chosen: a span before the
+            // timeline's start covers nothing, so every lane reads as free
+            // and the words land under the footage instead of over it.
+            let start = start.max(0.0);
             let timeline = project.active_mut();
             let track_id = match track_id {
                 Some(id) if timeline.track(&id).is_some() => id,
@@ -173,6 +188,8 @@ pub(super) fn apply(
             let duration = duration
                 .unwrap_or(DEFAULT_TEXT_DURATION)
                 .max(MIN_CLIP_DURATION);
+            // Floored at zero before the lane is chosen; see `AddTextClip`.
+            let start = start.max(0.0);
             let timeline = project.active_mut();
             let track_id = match track_id {
                 Some(id) if timeline.track(&id).is_some() => id,
@@ -209,6 +226,8 @@ pub(super) fn apply(
             let duration = duration
                 .unwrap_or(DEFAULT_LAYER_DURATION)
                 .max(MIN_CLIP_DURATION);
+            // Floored at zero before the lane is chosen; see `AddTextClip`.
+            let start = start.max(0.0);
             let timeline = project.active_mut();
             let track_id = match track_id {
                 Some(id) if timeline.track(&id).is_some() => id,

@@ -97,4 +97,14 @@ pub enum Error {
         /// Its name.
         name: String,
     },
+
+    /// A frame this operation cannot take: a deep one, where the operation
+    /// works in eight bits a channel.
+    #[error("{path}: {detail}")]
+    UnsupportedFrame {
+        /// The file or source the frame came from.
+        path: PathBuf,
+        /// What about the frame the operation could not take.
+        detail: String,
+    },
 }

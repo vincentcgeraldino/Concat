@@ -173,7 +173,7 @@ mod tests {
             path: "/p".to_owned(),
             frame: 30,
             total: 120,
-            stage: "video".to_owned(),
+            stage: "rendering".to_owned(),
         });
         let running = book.status("j1").expect("known");
         assert_eq!(running.state, JobState::Running);

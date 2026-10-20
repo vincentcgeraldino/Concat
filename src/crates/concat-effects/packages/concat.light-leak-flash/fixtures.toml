@@ -23,3 +23,24 @@ input = [0.8, 0.5, 0.3, 1]
 to = [0.05, 0.15, 0.4, 1]
 progress = 0.37
 expect = [1, 1, 1, 1]
+
+# Past halfway through the cut the leak's distance from the flash is
+# negative over most of the frame - the half of the cut the cases above
+# never reached, since they all sit at 0.37. A shader that asked a power
+# for that square got an indeterminate answer where the base was
+# negative, and the band came out NaN.
+#
+# The strength is a middle one so the flash does not burn the frame to
+# white and hide the answer: at the extremes the picture is white either
+# way, and the case would pass on a broken shader as well as a whole one.
+[[probe]]
+name = "past-halfway"
+params = { strength = 40 }
+input = [0.8, 0.5, 0.3, 1]
+to = [0.05, 0.15, 0.4, 1]
+progress = 0.75
+expect = [0.659, 0.58, 0.656, 1]
+# Wider than the others: a half float and a chain of powers leave their
+# mark, and the point of the case is the shape of the answer, not its
+# last digit.
+tolerance = 0.05

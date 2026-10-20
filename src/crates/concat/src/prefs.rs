@@ -264,12 +264,56 @@ impl Preferences {
 
     /// Writes the file. Best effort: a preference that did not stick is
     /// not worth interrupting anyone over.
+    ///
+    /// Through a temporary file and a rename, so the file on disk is never
+    /// half-written: this is written on every step of a colour picker's
+    /// drag, and a crash in the middle of one left a truncated file -
+    /// which the reader below takes for "no file at all", and every
+    /// setting with it. The other writers in the app do the same.
     pub fn save(&self, dirs: &AppDirs) {
         let _ = std::fs::create_dir_all(&dirs.config);
-        if let Ok(encoded) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(dirs.config.join(FILE), encoded);
+        let Ok(encoded) = serde_json::to_vec_pretty(self) else {
+            return;
+        };
+        let target = dirs.config.join(FILE);
+        let partial = target.with_extension("json.partial");
+        if std::fs::write(&partial, &encoded).is_err() {
+            let _ = std::fs::remove_file(&partial);
+            return;
+        }
+        // Replacing a file by rename needs DELETE access to the target,
+        // where writing in place needs only WRITE: a sync client, a
+        // backup tool or a scanner holding the file a moment makes
+        // Windows refuse the replace (access denied, sharing violation),
+        // and the settings would be silently not saved. Tried again for
+        // a moment, as the project saver does.
+        let mut wait = std::time::Duration::from_millis(50);
+        let mut tries = 0;
+        loop {
+            match std::fs::rename(&partial, &target) {
+                Ok(()) => return,
+                Err(error) if tries < 5 && transient(&error) => {
+                    tries += 1;
+                    std::thread::sleep(wait);
+                    wait *= 2;
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&partial);
+                    log::warn!("could not write {}: {error}", target.display());
+                    return;
+                }
+            }
         }
     }
+}
+
+/// Whether a failed replace is another program holding the file for a
+/// moment: on Windows, access denied (5) or a sharing violation (32).
+/// Elsewhere a rename is not refused that way, so nothing is retried.
+fn transient(error: &std::io::Error) -> bool {
+    cfg!(windows)
+        && (error.kind() == std::io::ErrorKind::PermissionDenied
+            || matches!(error.raw_os_error(), Some(5 | 32)))
 }
 
 #[cfg(test)]

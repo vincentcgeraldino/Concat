@@ -123,6 +123,12 @@ pub(super) fn apply(
                 .clips
                 .iter()
                 .filter(|other| other.detached_from.as_deref() == Some(video_id.as_str()))
+                // A clip that names itself as its own sound - a hand-edited
+                // document says so, and the reader takes it - is not a sound
+                // to put back: it is the clip itself. Left in, the replace
+                // below would take the very clip the sound was to go to
+                // with it.
+                .filter(|other| other.id != video_id)
                 .map(|other| Clip::clone(other))
                 .collect();
             if sounds.is_empty() {

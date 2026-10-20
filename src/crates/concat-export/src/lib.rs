@@ -1756,12 +1756,20 @@ fn render_picture(
                         .scaled_to(decode_width, decode_height)
                         .at_rate(decode_rate)
                         .in_range(ranges.get(&layer.clip).copied())
-                        .deep(!cutouts.contains_key(&layer.clip));
+                        .deep(!cutouts.contains_key(&layer.clip))
+                        // A clip can outlive its media - an end-trim past the
+                        // file's length - and the honest picture for any time
+                        // past the end is the last frame. The pool answers
+                        // with it, the preview shows it, and the paused
+                        // monitor is tested for it. Without this the decoder
+                        // simply ran out, the layer was dropped, and the
+                        // export drew black where the monitor drew the
+                        // picture.
+                        .repeating();
 
-                    // A still is a one-frame stream. Without looping it would
-                    // contribute a single frame and then disappear.
+                    // A still is a one-frame stream, read from its start.
                     if stills.contains(&layer.clip) {
-                        options = options.repeating().starting_at(Rational::ZERO);
+                        options = options.starting_at(Rational::ZERO);
                     }
 
                     entry.insert(
@@ -1770,9 +1778,12 @@ fn render_picture(
                 }
             };
 
-            // A source that has run out contributes nothing rather than
+            // A source with no frame at all contributes nothing rather than
             // aborting the export - a clip trimmed past its media's end is a
-            // mistake in the edit, not a failure of the renderer.
+            // mistake in the edit, not a failure of the renderer. A source
+            // that has run out is a different thing: the decoder repeats
+            // its last frame, so the clip is still drawn, on the picture
+            // the monitor shows.
             if let Some(frame) = decoder.next_frame().map_err(|error| error.to_string())? {
                 // The cutout, on the decoded picture before it is placed:
                 // the same frame both compositors then draw.

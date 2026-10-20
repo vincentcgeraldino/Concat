@@ -755,6 +755,145 @@ mod tests {
         assert_eq!(start_of(&editor, &added[0]), 10.0);
     }
 
+    /// A position before the timeline's start is floored at zero, as the
+    /// command's own contract says - and the lane is looked at *after* that,
+    /// not before. A span lying before the timeline covers nothing, so the
+    /// lane read as free, and the clip - placed at zero, as `Clip::blank`
+    /// has it - landed on top of the one that was there.
+    #[test]
+    fn a_clip_added_before_the_start_does_not_land_on_top_of_another() {
+        let (mut editor, media_id, first) = fixture();
+        // Twenty seconds before the start of a ten-second clip: the span
+        // the lane is asked about ends before the timeline does.
+        let added = editor
+            .apply(Command::AddClipAtFirstFree {
+                media_id,
+                start: -20.0,
+            })
+            .expect("adds")
+            .created_id
+            .expect("id");
+        let clip = editor.project().active().clip(&added).expect("there");
+        assert_eq!(clip.start, 0.0, "the position is floored at zero");
+        assert_ne!(
+            clip.track_id,
+            editor
+                .project()
+                .active()
+                .clip(&first)
+                .expect("there")
+                .track_id,
+            "the clip landed on a lane that was taken"
+        );
+    }
+
+    /// The same, on a lane named: a magnetic drop makes room for the clip
+    /// rather than covering what is there.
+    #[test]
+    fn a_clip_added_before_the_start_on_a_lane_makes_room_instead_of_covering() {
+        let (mut editor, media_id, first) = fixture();
+        let video = editor.project().active().tracks[0].id.clone();
+        let added = editor
+            .apply(Command::AddClip {
+                media_id,
+                track_id: video,
+                start: -20.0,
+                ripple: true,
+            })
+            .expect("adds")
+            .created_id
+            .expect("id");
+        let clip = editor.project().active().clip(&added).expect("there");
+        assert_eq!(clip.start, 0.0, "the position is floored at zero");
+        // The clip that was there moved along to make room, so the two do
+        // not cover each other.
+        assert_eq!(
+            start_of(&editor, &first),
+            10.0,
+            "the clip that was there did not move along"
+        );
+    }
+
+    /// A title added before the start lands above the footage, where it
+    /// belongs: the lane is chosen after the position is floored, so the
+    /// lane the video holds is not free over the title's span. Before
+    /// that, the title landed on the video's own lane, after it, and
+    /// under the picture.
+    #[test]
+    fn a_title_added_before_the_start_lands_above_the_footage() {
+        let (mut editor, _media_id, first) = fixture();
+        let video = editor
+            .project()
+            .active()
+            .clip(&first)
+            .expect("there")
+            .track_id
+            .clone();
+        let title = editor
+            .apply(Command::AddTextClip {
+                track_id: None,
+                above: true,
+                start: -20.0,
+                style: Some(TextStyle {
+                    content: "hi".to_owned(),
+                    ..TextStyle::default()
+                }),
+                duration: Some(4.0),
+                offset_y: None,
+            })
+            .expect("adds")
+            .created_id
+            .expect("id");
+        let title = editor.project().active().clip(&title).expect("there");
+        let tracks = &editor.project().active().tracks;
+        let title_row = tracks
+            .iter()
+            .position(|track| track.id == title.track_id)
+            .expect("a lane");
+        let video_row = tracks
+            .iter()
+            .position(|track| track.id == video)
+            .expect("a lane");
+        assert!(
+            title_row > video_row,
+            "the title landed on lane {title_row}, not above the video's {video_row}"
+        );
+    }
+
+    /// A clip that names itself as its own sound - a hand-edited document
+    /// says so, and the reader takes it - has no sound to put back: it is
+    /// the clip. Reattaching it used to delete the very clip the sound
+    /// was to go to, and then ask for it again and find it gone.
+    #[test]
+    fn reattaching_a_clip_that_is_its_own_sound_does_not_delete_it() {
+        let (mut editor, media_id, first) = fixture();
+        // The clip points at itself, as a document that has been edited by
+        // hand can.
+        editor
+            .project_mut()
+            .active_mut()
+            .clip_mut(&first)
+            .expect("there")
+            .detached_from = Some(first.clone());
+        let before = editor.project().active().clips.len();
+        let outcome = editor
+            .apply(Command::ReattachAudio {
+                clip_id: first.clone(),
+            })
+            .expect("answers");
+        assert!(!outcome.applied, "there was nothing to put back");
+        assert_eq!(
+            editor.project().active().clips.len(),
+            before,
+            "the clip was deleted looking for its own sound"
+        );
+        assert!(
+            editor.project().active().clip(&first).is_some(),
+            "the clip is gone"
+        );
+        let _ = media_id;
+    }
+
     #[test]
     fn a_plain_trim_stops_at_the_next_clip() {
         let (mut editor, media_id, first) = fixture();
