@@ -601,6 +601,29 @@ impl Manifest {
             if param.min > param.max {
                 return Err(self.invalid(format!("parameter `{}`: min is above max", param.key)));
             }
+            // A bound that is not a number is refused here rather than
+            // where it is used: the arithmetic that holds a value to it
+            // panics on a NaN bound, and a package is a folder anyone can
+            // share. An infinite bound is a range nobody can drag to the
+            // end of, so it is refused too.
+            if !param.min.is_finite() || !param.max.is_finite() {
+                return Err(self.invalid(format!(
+                    "parameter `{}`: its range must be a number",
+                    param.key
+                )));
+            }
+            if !param.default.is_finite() {
+                return Err(self.invalid(format!(
+                    "parameter `{}`: its default must be a number",
+                    param.key
+                )));
+            }
+            if !param.step.is_finite() || param.step < 0.0 {
+                return Err(self.invalid(format!(
+                    "parameter `{}`: its step must be a number",
+                    param.key
+                )));
+            }
             if param.default < param.min || param.default > param.max {
                 return Err(self.invalid(format!(
                     "parameter `{}`: default {} is outside {}..{}",
@@ -623,6 +646,12 @@ impl Manifest {
                         param.key,
                         param.values.len(),
                         param.labels.len()
+                    )));
+                }
+                if param.values.iter().any(|value| !value.is_finite()) {
+                    return Err(self.invalid(format!(
+                        "enum `{}` has a value that is not a number",
+                        param.key
                     )));
                 }
             }
@@ -861,6 +890,31 @@ mod tests {
         assert_eq!(manifest.params[0].kind, ParamType::Float);
         assert_eq!(manifest.params[0].step, 0.0);
         assert!(manifest.ffmpeg.is_some());
+    }
+
+    /// A knob's bounds are numbers: a bound that is not one is refused
+    /// here, at load, rather than where a value is held to it - the
+    /// arithmetic that does that panics on a NaN bound, and a package is a
+    /// folder anyone can share.
+    #[test]
+    fn a_knob_with_a_bound_that_is_not_a_number_is_refused() {
+        rejects(&GOOD.replace("min = 1", "min = nan"), "must be a number");
+        rejects(&GOOD.replace("max = 50", "max = nan"), "must be a number");
+        rejects(&GOOD.replace("max = 50", "max = inf"), "must be a number");
+        rejects(
+            &GOOD.replace("default = 10", "default = nan"),
+            "must be a number",
+        );
+        rejects(
+            &GOOD.replace("min = 1", "min = 1\n        step = nan"),
+            "must be a number",
+        );
+        // An enum's values are numbers too.
+        let enumerated = GOOD.replace(
+            "        unit = \"px\"",
+            "        unit = \"px\"\n        type = \"enum\"\n        values = [1, nan]\n        labels = [\"one\", \"two\"]",
+        );
+        rejects(&enumerated, "not a number");
     }
 
     fn rejects(source: &str, needle: &str) {

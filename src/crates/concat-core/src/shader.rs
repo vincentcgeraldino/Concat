@@ -253,10 +253,12 @@ impl RevealMap {
         let last = rects.len().saturating_sub(1).max(1) as f32;
         for (index, &(x, y, w, h)) in rects.iter().enumerate() {
             let value = ((index as f32 / last) * 255.0).round() as u8;
-            let x0 = x.clamp(0, width as i32) as u32;
-            let y0 = y.clamp(0, height as i32) as u32;
-            let x1 = (x + w as i32).clamp(0, width as i32) as u32;
-            let y1 = (y + h as i32).clamp(0, height as i32) as u32;
+            // A rect's numbers may come from a file, so they are not
+            // trusted: the ends are worked out in a wide type and trimmed
+            // to the canvas, so no rect can make this overflow or run
+            // backwards.
+            let (x0, x1) = span(x, w, width);
+            let (y0, y1) = span(y, h, height);
             for row in y0..y1 {
                 let start = row as usize * width as usize + x0 as usize;
                 gray[start..start + (x1 - x0) as usize].fill(value);
@@ -277,6 +279,17 @@ impl RevealMap {
     pub fn identity() -> RevealMap {
         RevealMap::from_rects(2, 2, &[])
     }
+}
+
+/// The part of a canvas a rect covers, as `(start, end)` in canvas pixels:
+/// the rect is trimmed to the canvas, and a rect that reaches backwards
+/// or nowhere near it covers nothing. The ends never run backwards, so
+/// the caller can take the difference without checking.
+fn span(start: i32, size: u32, limit: u32) -> (u32, u32) {
+    let limit = i64::from(limit);
+    let first = i64::from(start).clamp(0, limit);
+    let last = (i64::from(start) + i64::from(size)).clamp(0, limit);
+    (first as u32, last.max(first) as u32)
 }
 
 /// FNV-1a, so a table's id needs no dependency and is the same on every
@@ -368,5 +381,32 @@ mod tests {
     fn a_single_word_reveals_at_the_very_start() {
         let map = RevealMap::from_rects(4, 4, &[(0, 0, 2, 2)]);
         assert_eq!(map.gray[0], 0);
+    }
+
+    /// A rect's numbers may come from a file beside a rendered title, so
+    /// they are not to be trusted: one that runs backwards, one that
+    /// overflows, and one that is nowhere near the canvas are all trimmed
+    /// to the canvas rather than panicking.
+    #[test]
+    fn a_rect_that_makes_no_sense_is_trimmed_to_the_canvas() {
+        // The second word is painted at full reveal, so its pixels are
+        // told apart from the first word's, which are left at zero.
+        // A width that would run the end past the canvas.
+        let map = RevealMap::from_rects(10, 10, &[(0, 0, 2, 2), (8, 0, u32::MAX, 2)]);
+        assert_eq!(map.gray[8], 255, "the part inside the canvas is painted");
+        assert_eq!(map.gray[9], 255, "as far as the canvas goes");
+        assert_eq!(map.gray[7], 0, "and no further back than it starts");
+        // A rect that starts before the canvas and ends inside it.
+        let map = RevealMap::from_rects(10, 10, &[(0, 0, 2, 2), (-4, 0, 6, 2)]);
+        assert_eq!(map.gray[0], 255, "the part inside the canvas is painted");
+        assert_eq!(map.gray[1], 255);
+        assert_eq!(map.gray[2], 0, "and no further on than it ends");
+        // A rect entirely off the canvas paints nothing.
+        let map = RevealMap::from_rects(10, 10, &[(0, 0, 2, 2), (100, 100, 4, 4)]);
+        assert!(map.gray[2..].iter().all(|&g| g == 0));
+        // A rect whose size overflows an i32 is trimmed, not wrapped.
+        let map = RevealMap::from_rects(10, 10, &[(0, 0, 2, 2), (0, 0, u32::MAX, u32::MAX)]);
+        assert_eq!(map.gray.len(), 100);
+        assert_eq!(map.gray[9], 255, "the whole canvas is covered");
     }
 }

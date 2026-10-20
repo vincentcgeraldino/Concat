@@ -412,18 +412,19 @@ impl VoiceoverPane {
         self.meter = None;
         self.opened = None;
         self.error = None;
-        // An iPhone records only with its audio session set to play and
-        // record together; left as it is, the microphone hands over
-        // silence. Set before the device opens, and a failure said
-        // plainly rather than a take of nothing.
+        // The microphone first: on a phone the system asks, and the answer
+        // comes back later. An iPhone records only with its audio session
+        // set to play and record together; left as it is, the microphone
+        // hands over silence. Set before the device opens, and a failure
+        // said plainly rather than a take of nothing.
+        if !crate::platform::microphone_allowed() {
+            self.error = Some(t("voiceover.permission"));
+            return;
+        }
         #[cfg(target_os = "ios")]
         if let Err(error) = crate::ios::record_alongside_playback() {
             log::warn!("voiceover: the audio session would not record: {error}");
             self.error = Some(tf("voiceover.failed", &[&error]));
-            return;
-        }
-        if !crate::platform::microphone_allowed() {
-            self.error = Some(t("voiceover.permission"));
             return;
         }
         self.opening = self.opening.wrapping_add(1);

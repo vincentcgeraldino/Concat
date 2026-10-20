@@ -95,6 +95,51 @@ thread_local! {
         const { std::cell::OnceCell::new() };
 }
 
+/// Whether the microphone may be opened, asking the system when it has
+/// not been told. The question goes up and the answer comes back later:
+/// the panel says "try again", and the next time it is asked the answer is
+/// there.
+///
+/// Without this the app opened the microphone on a phone that had never
+/// been asked, and the system gave it a silent input - a take of nothing,
+/// and nothing said about why.
+pub fn microphone_allowed() -> bool {
+    let Some(class) = AnyClass::get(c"AVAudioSession") else {
+        // No audio session: this is not a phone that records.
+        return true;
+    };
+    // SAFETY: `sharedInstance` takes nothing and returns the app's
+    // session; `recordPermission` takes nothing and returns the answer
+    // the system has given so far.
+    let session: Option<Retained<AnyObject>> = unsafe { msg_send![class, sharedInstance] };
+    let Some(session) = session else { return true };
+    let permission: Option<Retained<NSString>> = unsafe { msg_send![&session, recordPermission] };
+    match permission.map(|answer| answer.to_string()).as_deref() {
+        Some("granted") => true,
+        Some("denied") => false,
+        // "undetermined": the question has not been put up yet. Put it up
+        // now; the system keeps the one it shows, and the answer is in
+        // the permission the next time it is read.
+        _ => {
+            ask_for_the_microphone(session);
+            false
+        }
+    }
+}
+
+/// Puts the system's question up: may this app record? The answer comes
+/// back on a thread of the system's choosing, and is read the next time
+/// the panel is opened.
+fn ask_for_the_microphone(session: Retained<AnyObject>) {
+    // The block the system calls with the answer. It does nothing: the
+    // answer is in the session's own permission, and the panel reads it
+    // there.
+    let handler = RcBlock::new(move |_granted: objc2::runtime::Bool| {});
+    // SAFETY: `requestRecordPermission:` takes one block and nothing
+    // else; the block is called once, on a thread of the system's.
+    let _: () = unsafe { msg_send![&session, requestRecordPermission: &*handler] };
+}
+
 /// Installs the iPhone's picker and its export publisher into the window's
 /// crate. Before the window runs; see `platform::install_file_picker`.
 pub fn install() {
@@ -135,6 +180,7 @@ pub fn install() {
         publish: Box::new(save_to_photos),
         publish_document: Box::new(|path, _mime| keep_in_exports(path)),
     });
+    crate::platform::install_microphone_access(Box::new(microphone_allowed));
 }
 
 /// Hands the pick in flight what it got.

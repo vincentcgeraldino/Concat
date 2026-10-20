@@ -365,7 +365,11 @@ impl Expr {
                 .cloned()
                 .ok_or_else(|| EvalError(format!("unknown name `{name}`"))),
             Expr::Neg(inner) => match inner.eval(env)? {
-                Value::Int(n) => Ok(Value::Int(-n)),
+                Value::Int(n) => {
+                    Ok(Value::Int(n.checked_neg().ok_or_else(|| {
+                        EvalError("the number is too large".to_owned())
+                    })?))
+                }
                 Value::Float(x) => Ok(Value::Float(-x)),
                 Value::Text(_) => Err(EvalError("cannot negate text".to_owned())),
             },
@@ -400,6 +404,37 @@ fn finite(value: f64, what: &str) -> Result<f64, EvalError> {
 /// The same, as a value.
 fn real(value: f64, what: &str) -> Result<Value, EvalError> {
     Ok(Value::Float(finite(value, what)?))
+}
+
+/// A real number as a whole one, rounded as `round` does: to the nearest,
+/// halves away from zero. A number too large for a whole one is refused:
+/// the cast Rust makes would saturate at the edge, and a whole number at
+/// the edge is one the arithmetic cannot work with - it cannot even be
+/// negated.
+fn whole(value: f64, what: &str) -> Result<i64, EvalError> {
+    let value = finite(value, what)?;
+    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(EvalError(format!("{what}: {value} is too large")));
+    }
+    Ok(value.round() as i64)
+}
+
+/// A real number as a whole one, rounded towards minus infinity.
+fn floored(value: f64, what: &str) -> Result<i64, EvalError> {
+    let value = finite(value, what)?;
+    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(EvalError(format!("{what}: {value} is too large")));
+    }
+    Ok(value.floor() as i64)
+}
+
+/// A real number as a whole one, rounded towards infinity.
+fn ceiled(value: f64, what: &str) -> Result<i64, EvalError> {
+    let value = finite(value, what)?;
+    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(EvalError(format!("{what}: {value} is too large")));
+    }
+    Ok(value.ceil() as i64)
 }
 
 fn binary(op: Op, left: &Value, right: &Value) -> Result<Value, EvalError> {
@@ -490,13 +525,16 @@ fn call(name: &str, args: &[Value]) -> Result<Value, EvalError> {
             _ => Value::Float(num(0)?.max(num(1)?)),
         },
         "abs" => match &args[0] {
-            Value::Int(n) => Value::Int(n.abs()),
+            Value::Int(n) => Value::Int(
+                n.checked_abs()
+                    .ok_or_else(|| EvalError("the number is too large".to_owned()))?,
+            ),
             _ => Value::Float(num(0)?.abs()),
         },
-        "floor" => Value::Int(num(0)?.floor() as i64),
-        "ceil" => Value::Int(num(0)?.ceil() as i64),
+        "floor" => Value::Int(floored(num(0)?, "floor")?),
+        "ceil" => Value::Int(ceiled(num(0)?, "ceil")?),
         // Nearest integer, halves away from zero.
-        "round" => Value::Int(num(0)?.round() as i64),
+        "round" => Value::Int(whole(num(0)?, "round")?),
         // The root of a negative number is not a number, and the square
         // of a negative one is only a number where the exponent is a
         // whole number. Both would reach the graph as "NaN".
@@ -685,5 +723,47 @@ mod tests {
         assert!(fails("clamp(round(5), round(10), round(0))"));
         assert!(fails("clamp(0.5, 0, sqrt(0 - 1))"));
         assert_eq!(eval("clamp(0.5, 1, 1)", &[]), Value::Float(1.0));
+    }
+
+    /// A whole number at the very edge of what an `i64` holds cannot be
+    /// negated or made positive: both wrap round to a wrong number, and a
+    /// wrong number in the graph is a filter that does something nobody
+    /// asked for. They are refused instead, as the arithmetic that
+    /// overflows is.
+    #[test]
+    fn a_whole_number_at_the_edge_cannot_be_negated_or_made_positive() {
+        let lowest = Value::Int(i64::MIN);
+        // Negating the lowest whole number has no answer.
+        assert!(error("-low", &[("low", lowest.clone())]).is_some());
+        // And its absolute value has none either.
+        assert!(error("abs(low)", &[("low", lowest.clone())]).is_some());
+        // And an expression can reach that number on its own: a power of
+        // ten is past the range of a whole one, and the cast that made it
+        // used to land on the lowest whole number there is.
+        assert!(error("-round(0 - pow(10, 300))", &[]).is_some());
+        assert!(error("abs(round(0 - pow(10, 300)))", &[]).is_some());
+        // The highest is fine to negate and to make positive.
+        assert_eq!(
+            eval("-high", &[("high", Value::Int(i64::MAX))]),
+            Value::Int(-i64::MAX)
+        );
+        assert_eq!(
+            eval("abs(high)", &[("high", Value::Int(i64::MAX))]),
+            Value::Int(i64::MAX)
+        );
+    }
+
+    /// A real number too large for a whole one is refused rather than
+    /// quietly made into the largest one there is: the edge of the range
+    /// is a number the arithmetic cannot work with.
+    #[test]
+    fn a_real_number_too_large_for_a_whole_one_is_refused() {
+        // A number the expression can make, a power of ten.
+        assert!(error("round(pow(10, 300))", &[]).is_some());
+        assert!(error("round(0 - pow(10, 300))", &[]).is_some());
+        assert!(error("floor(pow(10, 300))", &[]).is_some());
+        assert!(error("ceil(pow(10, 300))", &[]).is_some());
+        // One that fits is still a whole number.
+        assert_eq!(eval("round(12.4)", &[]), Value::Int(12));
     }
 }
