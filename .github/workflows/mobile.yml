@@ -131,14 +131,23 @@ jobs:
       # the phone's standard library.
       - name: The pinned toolchain
         id: toolchain
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)
+          if [ -z "$channel" ]; then echo "::error::no channel in src/rust-toolchain.toml"; exit 1; fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (v1), 2026-10-09
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
+      # cargo-apk, the one that builds an APK, pinned: the action
+      # installs the newest one otherwise, and a build tool that changes
+      # under a build is a build that changes under a build. 0.10.0 is
+      # the newest cargo-apk crates.io has.
       - uses: taiki-e/cache-cargo-install-action@7447f04c51f2ba27ca35e7f1e28fab848c5b3ba7 # v2.3.1
         with:
           tool: cargo-apk
+          version: "0.10.0"
 
       # The runner image carries the SDK and an NDK; the script finds the
       # newest NDK under the SDK on its own, and the build scripts of
@@ -357,7 +366,11 @@ jobs:
           echo "Building Concat $version for aarch64-apple-ios"
       - name: The pinned toolchain
         id: toolchain
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)
+          if [ -z "$channel" ]; then echo "::error::no channel in src/rust-toolchain.toml"; exit 1; fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (v1), 2026-10-09
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -439,6 +452,28 @@ jobs:
           (cd payload && ditto -c -k --keepParent Payload "../stage/Concat-$VERSION-ios-arm64.ipa")
           ls -l stage
 
+      # The .ipa's own shape: the bundle inside it, the binary, the
+      # framework the binary loads, the icon the home screen shows. The
+      # .ipa is for a phone, so no simulator can be made to run it - the
+      # simulator smoke test below builds its own - and a bundle missing
+      # something is a bundle that fails on the phone and nowhere else.
+      - name: What is in the .ipa
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf ipa-check && mkdir -p ipa-check
+          ditto -x -k "stage/Concat-$VERSION-ios-arm64.ipa" ipa-check
+          app=ipa-check/Payload/Concat.app
+          [ -d "$app" ] || { echo "the .ipa has no Concat.app in it"; exit 1; }
+          [ -x "$app/Concat" ] || { echo "the bundle has no binary"; exit 1; }
+          [ -d "$app/Frameworks/SherpaOnnxC.framework" ] \
+            || { echo "the bundle has no sherpa-onnx framework"; exit 1; }
+          [ -f "$app/AppIcon.png" ] || { echo "the bundle has no icon"; exit 1; }
+          /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Info.plist" > /dev/null
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIcons' "$app/Info.plist" > /dev/null
+          find "$app" -type f | head -50
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Concat-ios-arm64
@@ -463,7 +498,11 @@ jobs:
       - name: The pinned toolchain
         id: toolchain
         timeout-minutes: 1
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)
+          if [ -z "$channel" ]; then echo "::error::no channel in src/rust-toolchain.toml"; exit 1; fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (v1), 2026-10-09
         timeout-minutes: 10
         with:

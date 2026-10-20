@@ -15,7 +15,11 @@ fn heart_d(p: vec2<f32>) -> f32 {
 // symmetric angles.
 fn star_d(p: vec2<f32>) -> f32 {
     let r = length(p);
-    let a = atan2(p.y, p.x);
+    // The angle of a vector that is nothing is not a number: `atan2` of
+    // two zeroes is left to the driver, and a driver that answers NaN
+    // would put a NaN pixel in the middle of the frame. The star's
+    // first point is at three o'clock there.
+    let a = select(atan2(p.y, p.x), 0.0, all(p == vec2<f32>(0.0)));
     let points = 5.0;
     let seg = 6.28318530718 / points;
     let m = cos(floor(a / seg + 0.5) * seg - a) * 0.35 + 0.65;

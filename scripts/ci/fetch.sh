@@ -36,7 +36,11 @@ row() {
 
 digest() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{ print $1 }'
+    # GNU coreutils escapes a file name that holds a backslash by
+    # prefixing the whole line with one - and a Windows path holds
+    # backslashes, so the hash came out as "\<hash>" and never matched
+    # the one in the lock. The escape is on the line, not on the hash.
+    sha256sum "$1" | awk '{ sub(/^\\/, "", $1); print $1 }'
   else
     shasum -a 256 "$1" | awk '{ print $1 }'
   fi

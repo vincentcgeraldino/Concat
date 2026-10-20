@@ -32,7 +32,12 @@ rm -rf "$app"
 mkdir -p "$app/Frameworks"
 cp "$binary" "$app/Concat"
 cp -R "$framework/$slice/SherpaOnnxC.framework" "$app/Frameworks/"
-cp "$root/assets/icons/concat_logo_512.png" "$app/AppIcon.png" 2>/dev/null || true
+# The icon, and it is a different file from the desktop's: the desktop's
+# is a rounded square with transparent corners, and iOS shows an icon
+# with transparent corners as black ones - the system does the rounding
+# itself. scripts/make-ios-icon.py puts the brand blue under the logo,
+# which is what the square logo looks like.
+cp "$root/assets/icons/concat_logo_512_ios.png" "$app/AppIcon.png"
 
 # The binary was linked against the dylib by the name the linker saw in
 # vendor/; in the bundle it lives in Frameworks/ under the framework's
@@ -70,6 +75,19 @@ cat > "$app/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>Concat</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleSupportedPlatforms</key><array><string>${platform}</string></array>
+  <!-- The icon, for the home screen. Without these the app is shown
+       with a blank square: a bundle with an icon file and no name for
+       it is one the system does not look in. -->
+  <key>CFBundleIcons</key>
+  <dict>
+    <key>CFBundlePrimaryIcon</key>
+    <dict>
+      <key>CFBundleIconFiles</key>
+      <array><string>AppIcon</string></array>
+      <key>UIPrerenderedIcon</key><false/>
+    </dict>
+  </dict>
+  <key>CFBundleIconName</key><string>AppIcon</string>
   <key>MinimumOSVersion</key><string>${ios_min}</string>
   <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
   <key>UILaunchScreen</key><dict/>

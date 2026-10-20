@@ -12,7 +12,13 @@ fn transition(uv: vec2<f32>, progress: f32) -> vec4<f32> {
     var in_scale: f32;
     if (params.direction < 0.5) {
         out_scale = 1.0 + p * 1.6;
-        in_scale = 1.6 - p * 1.6;
+        // The mirror of the branch below: the incoming picture comes from
+        // 2.6 - magnified, as the outgoing whips away - and lands on 1.0,
+        // its own size. It was 1.6 - p * 1.6, which lands on 0.0, and a
+        // scale of zero samples the picture's two edge columns and smears
+        // them across the frame: the cut ended on a stripe instead of on
+        // the shot it was cutting to.
+        in_scale = 2.6 - p * 1.6;
     } else {
         out_scale = 1.0 - p * 0.6;
         in_scale = 0.4 + p * 0.6;

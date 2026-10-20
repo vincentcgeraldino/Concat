@@ -330,7 +330,7 @@ impl Api {
 
     /// [`Request::ExportStatus`].
     pub fn job_status(&mut self, job: &str) -> Result<JobStatus, ApiError> {
-        self.jobs.reap(&self.book);
+        self.jobs.reap(&self.book, &self.events);
         self.book.status(job).ok_or_else(|| {
             ApiError::new(
                 ErrorCode::NotFound,
@@ -412,7 +412,7 @@ impl Api {
 
     /// How many jobs are still running.
     pub fn running(&mut self) -> usize {
-        self.jobs.reap(&self.book);
+        self.jobs.reap(&self.book, &self.events);
         self.jobs.threads.len()
     }
 
@@ -425,7 +425,7 @@ impl Api {
     /// Runs one request. The response is what the request is worth; a job
     /// it begins reports through the sink from then on.
     pub fn dispatch(&mut self, request: Request) -> Response {
-        self.jobs.reap(&self.book);
+        self.jobs.reap(&self.book, &self.events);
         self.run(request).into()
     }
 
@@ -786,7 +786,7 @@ impl Api {
 
     /// [`Request::ExportCancel`].
     pub fn cancel(&mut self, job: &str) -> Result<(), ApiError> {
-        self.jobs.reap(&self.book);
+        self.jobs.reap(&self.book, &self.events);
         if !self.jobs.threads.iter().any(|(name, _)| name == job) {
             return Err(ApiError::new(
                 ErrorCode::NotFound,
@@ -907,12 +907,20 @@ impl Jobs {
     }
 
     /// Forgets the threads that have ended. One that ended without its
-    /// last event - a panic in the render - is booked as failed.
-    fn reap(&mut self, book: &job::Book) {
+    /// last event - a panic in the render - is booked as failed, and the
+    /// subscribers are told: a caller that only listens for events would
+    /// otherwise wait for ever for one that never comes.
+    fn reap(&mut self, book: &job::Book, events: &EventSink) {
+        let events = Arc::clone(events);
         self.threads.retain(|(name, thread)| {
             let ended = thread.is_finished();
             if ended {
-                book.abandon(name);
+                // Through the sink, so the book the callers read and the
+                // stream they listen to are fed from the same place and
+                // cannot disagree.
+                if let Some(event) = book.abandon(name) {
+                    events(event);
+                }
             }
             !ended
         });

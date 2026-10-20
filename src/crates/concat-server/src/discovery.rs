@@ -2,18 +2,21 @@
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
 //! How a program on this machine finds the window's server: a small file
-//! in the app's config folder, written while the server runs and removed
-//! when it stops.
+//! in the app's own folder for this machine, written while the server runs
+//! and removed when it stops.
 //!
 //! The file is what an MCP adapter started by an agent reads - `concat
 //! --mcp`, launched by Claude Code or another client with no way to be
 //! told an address or a token - so it can go through the window's server
 //! rather than open projects behind the window's back. It holds the token,
 //! so it is written readable by its owner alone (0600 on Unix; on Windows
-//! the config folder's own per-user permissions), the way the preferences
-//! that may already hold a chosen token are. A file left by a window that
-//! crashed names a server that is no longer there; a reader finds that
-//! out by connecting, and [`Listing::pid`] lets it say why.
+//! the folder's own per-user permissions), the way the preferences
+//! that may already hold a chosen token are. The folder is the one that
+//! does not roam - Windows' config folder is copied to the next machine
+//! the domain profile reaches, and a token that opens the editor has no
+//! business travelling that way. A file left by a window that crashed
+//! names a server that is no longer there; a reader finds that out by
+//! connecting, and [`Listing::pid`] lets it say why.
 //!
 //! ```json
 //! {"version": 1, "address": "127.0.0.1:7420", "token": "...",
@@ -31,9 +34,9 @@ pub const FILE_NAME: &str = "automation.json";
 /// This layout. A reader refuses a file with another.
 pub const VERSION: u32 = 1;
 
-/// Where the listing is kept, under the app's config folder.
-pub fn path_in(config: &Path) -> PathBuf {
-    config.join(FILE_NAME)
+/// Where the listing is kept, under the folder the app keeps to itself.
+pub fn path_in(folder: &Path) -> PathBuf {
+    folder.join(FILE_NAME)
 }
 
 /// What the file says.

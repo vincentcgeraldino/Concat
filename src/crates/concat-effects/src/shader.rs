@@ -754,7 +754,13 @@ fn planckian(kelvin: f32) -> vec2<f32> {
 /// responses.
 fn white_cones(kelvin: f32, tint: f32) -> vec3<f32> {
     let here = planckian(kelvin);
-    let along = normalize(planckian(kelvin * 1.01) - here);
+    // The direction of the locus, taken a little way along it. The
+    // reference is taken inside the same range the curve is clamped to,
+    // or the two are the same point and their difference is nothing - and
+    // the length of nothing is not a number, which would put a NaN in
+    // the whole frame. A temperature past the curve's reach is not
+    // reachable from any package today; a wider one would be.
+    let along = normalize(planckian(clamp(kelvin * 1.01, 1668.0, 24999.0)) - here);
     let across = vec2<f32>(along.y, -along.x);
     let magenta = select(across, -across, across.y > 0.0);
     let uv = here + magenta * (tint * 0.0007);
@@ -1799,6 +1805,9 @@ pub struct TransitionShader {
     source: Arc<str>,
     slots: Vec<Slot>,
     span: usize,
+    /// The FFmpeg `xfade` shape the manifest names, for a compositor
+    /// that runs no shaders: the cut it draws instead of this one.
+    xfade: Option<String>,
 }
 
 impl TransitionShader {
@@ -1813,6 +1822,14 @@ impl TransitionShader {
             source,
             slots,
             span,
+            // The shape the manifest names. It was validated when the
+            // manifest was parsed and then dropped on the floor, so the
+            // cut a compositor without shaders drew was a plain dissolve
+            // whatever the package asked for.
+            xfade: manifest
+                .transition
+                .as_ref()
+                .and_then(|transition| transition.xfade.clone()),
         })
     }
 
@@ -1840,7 +1857,7 @@ impl TransitionShader {
             params: self.params_bytes(values, params),
             progress,
             lut,
-            xfade: None,
+            xfade: self.xfade.clone(),
         }
     }
 }

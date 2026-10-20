@@ -1517,15 +1517,38 @@ pub struct TextStyle {
     pub max_height: f64,
 }
 
+/// The most characters a title may hold. A title is a caption on a
+/// picture, and the layout measures every line as it builds it, so what
+/// a title costs grows with the square of its length: a paste of a whole
+/// chapter would take the window with it. Cut at a character boundary,
+/// and say that something was cut.
+const MAX_TITLE_CHARS: usize = 2_000;
+
+/// The text, at most `limit` characters, and an ellipsis when there was
+/// more. Cut at a character boundary: a byte boundary could land inside
+/// a character and leave the title with half of one at the end.
+fn clip(text: String, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text;
+    }
+    let mut out: String = text.chars().take(limit - 1).collect();
+    out.push('…');
+    out
+}
+
 impl TextStyle {
     /// Every number pulled into the range a title can be drawn at: a
     /// hand-edited zero size would render an invisible title, and lines
-    /// cannot collapse onto each other.
+    /// cannot collapse onto each other. The words are cut to what a
+    /// title may hold, for the same reason the numbers are pulled into
+    /// range: a title is a caption on a picture, and what it costs to
+    /// lay out grows with the square of its length.
     pub fn tidy(mut self) -> TextStyle {
         fn finite(value: f64, fallback: f64) -> f64 {
             if value.is_finite() { value } else { fallback }
         }
         let base = TextStyle::default();
+        self.content = clip(self.content, MAX_TITLE_CHARS);
         self.font_size = finite(self.font_size, base.font_size).clamp(0.01, 1.0);
         self.font_weight = finite(self.font_weight, base.font_weight).clamp(100.0, 900.0);
         self.opacity = finite(self.opacity, base.opacity).clamp(0.0, 1.0);

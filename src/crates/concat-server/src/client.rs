@@ -20,6 +20,11 @@ use serde_json::{Value, json};
 /// inline 8K frame.
 const MAX_REPLY: u64 = 256 * 1024 * 1024;
 
+/// How long a call may go without an answer before the client gives up.
+/// Long enough for a method that does real work, short enough that a
+/// server which has stopped answering does not hang the caller for ever.
+const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// A connection to a server, its token presented.
 pub struct Client {
     reader: BufReader<TcpStream>,
@@ -50,12 +55,15 @@ impl Client {
             address,
         };
         client
-            .exchange("auth", json!({ "token": token }))
+            .exchange("auth", json!({ "token": token }), true)
             .map_err(|error| could_not(&error))?;
+        // A call after the handshake is bounded too: a server that stops
+        // answering must not leave the caller waiting for ever, with no
+        // way out but closing the connection from the other end.
         client
             .reader
             .get_ref()
-            .set_read_timeout(None)
+            .set_read_timeout(Some(CALL_TIMEOUT))
             .map_err(|error| could_not(&error))?;
         Ok(client)
     }
@@ -77,11 +85,19 @@ impl Client {
             Some(Value::String(method)) => method,
             _ => return Err(ApiError::invalid("a request names its method")),
         };
-        self.exchange(&method, Value::Object(fields))
+        self.exchange(&method, Value::Object(fields), false)
     }
 
-    /// Sends one call and reads lines until its reply.
-    fn exchange(&mut self, method: &str, params: Value) -> Result<Value, ApiError> {
+    /// Sends one call and reads lines until its reply. `handshake` says
+    /// whether the call is the one that presents the token: only then is
+    /// a reply with no id the answer, because only then does the server
+    /// not know the caller's id.
+    fn exchange(
+        &mut self,
+        method: &str,
+        params: Value,
+        handshake: bool,
+    ) -> Result<Value, ApiError> {
         let id = self.next_id;
         self.next_id += 1;
         let line = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
@@ -90,8 +106,18 @@ impl Client {
                 "the connection to the Concat server failed: {error}"
             ))
         };
-        writeln!(self.writer, "{line}").map_err(|error| gone(&error))?;
-        self.writer.flush().map_err(|error| gone(&error))?;
+        // A call that was never sent is safe to send again; one that was
+        // sent and whose answer was lost is not: the server may have done
+        // it, and doing it twice is how a title ends up on the timeline
+        // twice. The two failures are told apart, so a caller knows which
+        // it has.
+        let never_sent = |error: &dyn std::fmt::Display| {
+            ApiError::failed(format!(
+                "the connection to the Concat server failed before the call was sent: {error}"
+            ))
+        };
+        writeln!(self.writer, "{line}").map_err(|error| never_sent(&error))?;
+        self.writer.flush().map_err(|error| never_sent(&error))?;
         loop {
             let mut reply = String::new();
             let read = std::io::Read::take(&mut self.reader, MAX_REPLY)
@@ -104,10 +130,13 @@ impl Client {
                 return Err(gone(&"the server sent something that is not JSON-RPC"));
             };
             // An event, or the refusal of a connection the server never
-            // let in (null id): the latter is the answer.
+            // let in (null id): the latter is the answer, and only while
+            // the handshake is outstanding. After that a null-id error is
+            // a notice - the server is shutting down, say - and it is not
+            // the answer to the call in flight.
             let answered = match message.get("id") {
                 Some(Value::Number(number)) => number.as_u64() == Some(id),
-                Some(Value::Null) => message.contains_key("error"),
+                Some(Value::Null) => handshake && message.contains_key("error"),
                 _ => false,
             };
             if !answered {

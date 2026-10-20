@@ -29,12 +29,27 @@ onnxruntime-osx-x86_64      https://github.com/microsoft/onnxruntime/releases/do
 
 # sherpa-onnx's prebuilt libraries. The version is the one src/Cargo.lock
 # resolves for sherpa-onnx-sys; the workflows check the two agree.
+#
+# The two for phones are here too, and were not before: the mobile build
+# fetched them with curl and checked nothing, so the bytes compiled into
+# an APK and an .ipa were whatever the download gave on the day. The iOS
+# one is published under a rolling release tag - sherpa-onnx keeps each
+# version's file under it - so the name in the URL carries the version
+# and the digest below pins the bytes.
 sherpa-onnx-linux-x64-static-lib            https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-v1.13.7-linux-x64-static-lib.tar.bz2            d1be7a69ac2b30120058d8302e624239a3064085383cfa47994a14fdc44c32d6
 sherpa-onnx-linux-aarch64-static-lib        https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-v1.13.7-linux-aarch64-static-lib.tar.bz2        743b4debabab2e9f654e393da7263bd9795aabed60ae80c83023054083415d14
 sherpa-onnx-osx-arm64-static-lib            https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-v1.13.7-osx-arm64-static-lib.tar.bz2            126daa2e8c09a4c5d54dc985722c43bd22f598adc56445905b377454b1b27e38
 sherpa-onnx-osx-x64-static-lib              https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-v1.13.7-osx-x64-static-lib.tar.bz2              8d8db6199af0119b16f6e2b01c5548b90c4392a462388dd59491e8c471283cca
 sherpa-onnx-win-x64-shared-MT-Release-lib   https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-v1.13.7-win-x64-shared-MT-Release-lib.tar.bz2   7a362a9f339a2937e7f8806e904f3e8a031a7774982eea08bca8336b2c257529
 sherpa-onnx-win-arm64-shared-MT-Release-lib https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-v1.13.7-win-arm64-shared-MT-Release-lib.tar.bz2 2afa23a479fe15729e1ea9a9ed242454b1d9fccf749103742071684baa91a232
+sherpa-onnx-android                        https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.7/sherpa-onnx-v1.13.7-android.tar.bz2                                  7208b26f5109777d1c3c22a45f04665419d6f3ea81f6811a2dfd5ff2d7622e6e
+sherpa-onnx-ios-xcframework                 https://github.com/k2-fsa/sherpa-onnx/releases/download/xcframework/sherpa-onnx-v1.13.7-ios-shared-onnxruntime-static.xcframework.zip   72db1b34ff75c6b4f3f40a73d46c4241e1c2b23599638975c66ad6dec10bb298
+
+# FFmpeg's source, for the phones: the desktop bundles link a build
+# somebody else made, and the phones compile FFmpeg themselves, so the
+# source is what the app is made of. Its version is FFMPEG_VERSION in
+# src/scripts/ffmpeg-mobile.sh; a bump changes both.
+ffmpeg-src-8.1                              https://ffmpeg.org/releases/ffmpeg-8.1.tar.xz                                                                    b072aed6871998cce9b36e7774033105ca29e33632be5b6347f3206898e0756a
 
 # The Linux packagers: nfpm (NFPM_VERSION in build-app.yml) for the .deb
 # and .rpm, and appimagetool with the AppImage runtime it embeds, both a

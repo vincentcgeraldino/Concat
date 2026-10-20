@@ -22,6 +22,23 @@
 #       dependencies it declares and nothing else, then `--version` and
 #       `--smoke` from the installed package and from the AppImage.
 #
+#   smoke-linux.sh --container-rpm IMAGE RPM
+#       The .rpm, in a clean IMAGE (fedora:latest) through docker: installed
+#       by dnf, which pulls in exactly the dependencies it declares and
+#       nothing else, then `--version` and `--smoke` from the installed
+#       package. The .rpm names its dependencies as RPM packages, and only
+#       an RPM tool can say whether those names are ones that exist.
+#
+#   smoke-linux.sh --container-pacman IMAGE PKG
+#       The Arch package, in a clean IMAGE (archlinux:latest) through
+#       docker: installed by pacman, then `--version` and `--smoke` from
+#       the installed package.
+#
+# The .deb and the AppImage were the only packages ever installed by a
+# test: a .rpm whose dependencies name packages RPM does not have, or an
+# Arch package whose depends list is short, reached every person who
+# installed it and nobody else.
+#
 # Runs in CI after staging (build-app.yml), and locally against a folder
 # or packages built the same way. Needs xvfb-run; strace if it is there.
 set -euo pipefail
@@ -132,6 +149,30 @@ container() {
     "$image" bash /ci/smoke-linux.sh --inside /pkg/concat.deb /pkg/concat.AppImage
 }
 
+container_rpm() {
+  [ $# -eq 2 ] || { echo "usage: $0 --container-rpm IMAGE RPM" >&2; exit 2; }
+  local image=$1 rpm
+  rpm=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+  [ -f "$rpm" ] || fail "$rpm is not there"
+  say "in a clean $image"
+  docker run --rm \
+    -v "$here/smoke-linux.sh:/ci/smoke-linux.sh:ro" \
+    -v "$rpm:/pkg/concat.rpm:ro" \
+    "$image" bash /ci/smoke-linux.sh --inside-rpm /pkg/concat.rpm
+}
+
+container_pacman() {
+  [ $# -eq 2 ] || { echo "usage: $0 --container-pacman IMAGE PKG" >&2; exit 2; }
+  local image=$1 pkg
+  pkg=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+  [ -f "$pkg" ] || fail "$pkg is not there"
+  say "in a clean $image"
+  docker run --rm \
+    -v "$here/smoke-linux.sh:/ci/smoke-linux.sh:ro" \
+    -v "$pkg:/pkg/concat.pkg.tar.zst:ro" \
+    "$image" bash /ci/smoke-linux.sh --inside-pacman /pkg/concat.pkg.tar.zst
+}
+
 # Inside the container. Xvfb and Mesa's software drivers stand in for
 # the desktop's display and GPU, and one font for the desktop's fonts;
 # everything else the program needs comes from the package's own
@@ -159,9 +200,46 @@ inside() {
     xvfb-run -a -s "-screen 0 1920x1080x24" "$appimage" --smoke
 }
 
+# Inside a Fedora container: the .rpm, installed by dnf. A dependency the
+# package names as an RPM package that RPM does not have fails here.
+inside_rpm() {
+  local rpm=$1
+  say "installing the .rpm and what it depends on"
+  dnf install -y "$rpm" \
+    xorg-x11-server-Xvfb xorg-x11-xauth mesa-vulkan-drivers dejavu-fonts > /dev/null
+
+  say "concat --version (the package)"
+  HOME=$(fresh_home) expect_ok "concat --version from the .rpm" 60 concat --version
+  say "concat --smoke (the package)"
+  HOME=$(fresh_home) expect_ok "concat --smoke from the .rpm" 180 \
+    xvfb-run -a -s "-screen 0 1920x1080x24" concat --smoke
+}
+
+# Inside an Arch container: the package, installed by pacman.
+inside_pacman() {
+  local pkg=$1
+  say "installing the package and what it depends on"
+  # The package database first: a container has none, and pacman needs
+  # one to resolve what the package depends on.
+  pacman -Sy --noconfirm > /dev/null
+  pacman -S --noconfirm --needed \
+    xorg-server xorg-xauth mesa vulkan-icd-loader ttf-dejavu > /dev/null
+  pacman -U --noconfirm "$pkg" > /dev/null
+
+  say "concat --version (the package)"
+  HOME=$(fresh_home) expect_ok "concat --version from the package" 60 concat --version
+  say "concat --smoke (the package)"
+  HOME=$(fresh_home) expect_ok "concat --smoke from the package" 180 \
+    xvfb-run -a -s "-screen 0 1920x1080x24" concat --smoke
+}
+
 case "${1:-}" in
   --container) shift; container "$@" ;;
+  --container-rpm) shift; container_rpm "$@" ;;
+  --container-pacman) shift; container_pacman "$@" ;;
   --inside) shift; inside "$@" ;;
+  --inside-rpm) shift; inside_rpm "$@" ;;
+  --inside-pacman) shift; inside_pacman "$@" ;;
   *) host "$@" ;;
 esac
 say "ok"

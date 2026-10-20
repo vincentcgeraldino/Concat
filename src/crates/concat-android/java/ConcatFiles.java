@@ -279,13 +279,29 @@ public class ConcatFiles extends Fragment {
             @Override
             public void run() {
                 List<String> paths = new ArrayList<String>();
-                File dir = new File(activity.getExternalFilesDir(null), "Imported");
-                dir.mkdirs();
-                for (Uri uri : uris) {
-                    File out = unique(dir, displayName(activity, uri));
-                    if (copy(activity, uri, out)) {
-                        paths.add(out.getAbsolutePath());
+                try {
+                    // The app's own folder on the external storage, or
+                    // the private one when the external storage is not
+                    // there: getExternalFilesDir answers null when it is
+                    // unmounted, and a File made of a null path is a
+                    // relative one that cannot be made.
+                    File base = activity.getExternalFilesDir(null);
+                    if (base == null) {
+                        base = activity.getFilesDir();
                     }
+                    File dir = new File(base, "Imported");
+                    dir.mkdirs();
+                    for (Uri uri : uris) {
+                        File out = unique(dir, displayName(activity, uri));
+                        if (copy(activity, uri, out)) {
+                            paths.add(out.getAbsolutePath());
+                        }
+                    }
+                } catch (Throwable failure) {
+                    // An uncaught exception on any thread ends the
+                    // process, and the answer would never come. The
+                    // files that did copy are still worth having.
+                    Log.w(TAG, "could not copy the picked files: " + failure);
                 }
                 filesPicked(paths.toArray(new String[0]));
             }
@@ -316,11 +332,36 @@ public class ConcatFiles extends Fragment {
         if (name == null || name.isEmpty()) {
             name = "import";
         }
-        // Whatever the provider called it, it is one file name.
-        return name.replace('/', '_').replace('\\', '_');
+        // Whatever the provider called it, it is one file name, and one
+        // the phone's storage will take: a name of more than 255 bytes is
+        // refused, and the file would be lost without a word.
+        return shorten(name.replace('/', '_').replace('\\', '_'));
     }
 
-    /** `name`, or `name (2)`, `name (3)`... until nothing is overwritten. */
+    /**
+     * The name, cut to what a file system takes - 255 bytes on the
+     * phones' storage - with the extension kept, so the file is still
+     * the kind of file it was. Cut at characters, not bytes: half a
+     * character is no name at all.
+     */
+    private static String shorten(String name) {
+        final int limit = 60;
+        if (name.length() <= limit) {
+            return name;
+        }
+        int dot = name.lastIndexOf('.');
+        String stem = dot > 0 ? name.substring(0, dot) : name;
+        String ext = dot > 0 ? name.substring(dot) : "";
+        if (ext.length() > 20) {
+            ext = "";
+        }
+        int keep = Math.max(1, limit - ext.length());
+        return stem.substring(0, Math.min(stem.length(), keep)) + ext;
+    }
+
+    /** `name`, or `name (1)`, `name (2)`... until nothing is overwritten.
+     *  The numbering is the media store's own, so a file that comes back
+     *  out of it and one imported here are named alike. */
     private static File unique(File dir, String name) {
         File out = new File(dir, name);
         if (!out.exists()) {
@@ -329,7 +370,7 @@ public class ConcatFiles extends Fragment {
         int dot = name.lastIndexOf('.');
         String stem = dot > 0 ? name.substring(0, dot) : name;
         String ext = dot > 0 ? name.substring(dot) : "";
-        for (int n = 2; ; n++) {
+        for (int n = 1; ; n++) {
             out = new File(dir, stem + " (" + n + ")" + ext);
             if (!out.exists()) {
                 return out;

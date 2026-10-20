@@ -473,6 +473,12 @@ fn is_id_segment(text: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// Whether `name` is a plain file name beside the manifest, and not a
+/// path into somewhere else.
+fn is_plain_file(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains('\\')
+}
+
 impl Manifest {
     /// Parses and validates `source`.
     pub fn parse(source: &str) -> Result<Manifest, Error> {
@@ -534,6 +540,27 @@ impl Manifest {
             let plain = !lut.file.contains('/') && !lut.file.contains('\\');
             if !plain || !lut.file.to_ascii_lowercase().ends_with(".cube") {
                 return Err(self.invalid("[lut] file must be a `.cube` beside the manifest"));
+            }
+        }
+        // The shader's file is beside the manifest, by name: a path would
+        // reach outside the package, and the file is read and handed to the
+        // shader compiler, which would say nothing about where it came
+        // from.
+        for (table, entry) in [
+            self.wgsl
+                .as_ref()
+                .map(|wgsl| ("[wgsl] entry", wgsl.entry.as_str())),
+            self.transition
+                .as_ref()
+                .map(|transition| ("[transition] entry", transition.entry.as_str())),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !is_plain_file(entry) {
+                return Err(self.invalid(format!(
+                    "{table} `{entry}` must be a file name beside the manifest"
+                )));
             }
         }
         for alias in &self.effect.aliases {

@@ -722,8 +722,25 @@ impl Package {
         };
         let manifest_text = read("effect.toml")?;
         let fixtures = read("fixtures.toml").ok();
-        let shader = read("effect.wgsl").ok();
         let manifest = Manifest::parse(&manifest_text)?;
+        // The shader is the file the manifest names, which is not always
+        // the one the built-ins happen to use. Reading a fixed name instead
+        // refused a package that follows its own manifest, with a message
+        // saying the shader it had named was not there - while it was.
+        let entry = manifest
+            .wgsl
+            .as_ref()
+            .map(|wgsl| wgsl.entry.as_str())
+            .or_else(|| {
+                manifest
+                    .transition
+                    .as_ref()
+                    .map(|transition| transition.entry.as_str())
+            });
+        let shader = match entry {
+            Some(name) => Some(read(name)?),
+            None => None,
+        };
         // The built-ins' author is theirs alone. A package of the user's
         // own under it would shadow, or be shadowed by, one that ships
         // with the app, and which won would turn on load order.

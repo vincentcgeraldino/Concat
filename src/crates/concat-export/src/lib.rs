@@ -1195,7 +1195,11 @@ pub fn render_on(
             &silent
         } else {
             reporter.cancelled()?;
-            reporter.emit(0, total_frames, "mixing audio");
+            // The picture is finished, so the bar stays where it is: the
+            // stage says what is being done now. It used to be put back
+            // to zero, and the bar jumped backwards from the end of the
+            // render to the start of the audio.
+            reporter.emit(total_frames, total_frames, "mixing audio");
             let mix: Vec<AudioClip> = sound.iter().flat_map(|clip| audio_pieces(clip)).collect();
             audio::mix_to_file(&mix, timeline_end, &mixed).map_err(|error| error.to_string())?;
 
@@ -1663,7 +1667,7 @@ fn render_picture(
 
     // How many devices have died under this export so far; see `recovered`.
     let mut losses = 0;
-    // When progress was last said; see `progress_due`.
+    // When progress was last said; see `progress`.
     let mut said = std::time::Instant::now();
 
     // One decoder per clip, opened at its in-point the first time the clip is
@@ -1861,8 +1865,8 @@ fn render_picture(
         let live: Vec<ClipId> = plan.layers.iter().map(|layer| layer.clip).collect();
         decoders.retain(|clip, _| live.contains(clip));
 
-        if progress_due(index, said.elapsed()) {
-            reporter.emit(index, total_frames, "rendering");
+        if let Some((done, whole)) = progress(index, total_frames, said.elapsed()) {
+            reporter.emit(done, whole, "rendering");
             said = std::time::Instant::now();
         }
     }
@@ -1879,9 +1883,20 @@ const PROGRESS_FRAMES: i64 = 15;
 /// sat still for fifteen of them and looked hung (#297).
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Whether the frame at `index` is one to report, `since` the last report.
-fn progress_due(index: i64, since: std::time::Duration) -> bool {
-    index % PROGRESS_FRAMES == 0 || since >= PROGRESS_INTERVAL
+/// What to report for the frame at `index`: the frames done and the whole,
+/// or nothing when it is not time to say. The frames done, not the frame
+/// being worked on - a count from zero is a frame short of the end at
+/// every report, and the export's progress never reached the end at all.
+///
+/// The last frame is said whatever the interval: the export is over when
+/// it is done, and a bar that stops a frame short of the whole says the
+/// job is not finished when it is.
+fn progress(index: i64, total: i64, since: std::time::Duration) -> Option<(i64, i64)> {
+    if index + 1 >= total || index % PROGRESS_FRAMES == 0 || since >= PROGRESS_INTERVAL {
+        Some((index + 1, total))
+    } else {
+        None
+    }
 }
 
 /// The shader passes for one clip at one instant: every keyed knob at its
@@ -3263,11 +3278,37 @@ mod tests {
     #[test]
     fn a_slow_export_reports_every_second() {
         let quick = std::time::Duration::from_millis(30);
-        assert!(progress_due(0, quick));
-        assert!(!progress_due(1, quick));
-        assert!(progress_due(15, quick));
-        assert!(progress_due(1, std::time::Duration::from_millis(1200)));
-        assert!(progress_due(7, PROGRESS_INTERVAL));
+        assert_eq!(progress(0, 100, quick), Some((1, 100)));
+        assert_eq!(progress(1, 100, quick), None);
+        assert_eq!(progress(15, 100, quick), Some((16, 100)));
+        assert_eq!(
+            progress(1, 100, std::time::Duration::from_millis(1200)),
+            Some((2, 100))
+        );
+        assert_eq!(progress(7, 100, PROGRESS_INTERVAL), Some((8, 100)));
+    }
+
+    /// The export's progress ends at the whole: the frames done, not the
+    /// frame being worked on, and the last frame said whatever the
+    /// interval. A bar that counts from zero stops a frame short of the
+    /// end, and the export never reached it.
+    #[test]
+    fn the_progress_ends_at_the_whole() {
+        let quick = std::time::Duration::from_millis(30);
+        // The last frame is said, even though it is not a fifteenth and
+        // no second has passed.
+        assert_eq!(progress(99, 100, quick), Some((100, 100)));
+        assert_eq!(progress(0, 1, quick), Some((1, 1)));
+        // And every report counts the frames done, so the numbers rise.
+        let mut last = 0;
+        for index in 0..100 {
+            if let Some((done, whole)) = progress(index, 100, quick) {
+                assert!(done > last, "the count went backwards at {index}");
+                assert_eq!(whole, 100);
+                last = done;
+            }
+        }
+        assert_eq!(last, 100, "the last report is the whole");
     }
 
     /// Only Linux is told to install a software renderer: a phone has

@@ -70,8 +70,16 @@ icon = "@mipmap/ic_launcher"
 # the end of the process, so each of these closed the app mid-edit: dark
 # mode switching on (at sunset, too), split screen, a larger font or
 # display size, a new language, a keyboard plugged in.
+#
+# `colorMode` and `grammaticalGender` are here for the same reason. The
+# first fires when the display's colour capabilities change - an HDR
+# phone switching to SDR, a foldable unfolding, an external display
+# attached - and the second when the system's grammatical-gender setting
+# changes, which the app's Russian, Arabic and Hebrew locales make
+# likely. Android ignores a value it does not know, so an older platform
+# is unaffected.
 [package.metadata.android.application.activity]
-config_changes = "orientation|keyboardHidden|keyboard|navigation|screenSize|smallestScreenSize|screenLayout|uiMode|density|fontScale|fontWeightAdjustment|locale|layoutDirection"
+config_changes = "orientation|keyboardHidden|keyboard|navigation|screenSize|smallestScreenSize|screenLayout|uiMode|colorMode|density|fontScale|fontWeightAdjustment|grammaticalGender|locale|layoutDirection"
 launch_mode = "singleTop"
 # Upright only. The phone shell is drawn for a screen held upright - the
 # monitor over the lanes over the bar - and turned on its side it left no

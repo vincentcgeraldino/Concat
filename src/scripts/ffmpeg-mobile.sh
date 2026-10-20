@@ -36,8 +36,10 @@ src=$work/ffmpeg-$version
 mkdir -p "$work"
 if [ ! -f "$src/configure" ]; then
   echo "Fetching FFmpeg $version"
-  curl -fsSL --retry 5 --retry-all-errors -o "$work/ffmpeg-$version.tar.xz" \
-    "https://ffmpeg.org/releases/ffmpeg-$version.tar.xz"
+  # Through scripts/ci/fetch.sh, which checks the source against the
+  # digest in scripts/ci/deps.lock: this is the code the app is made of,
+  # and it used to be whatever the download gave on the day.
+  "$workspace/scripts/ci/fetch.sh" "ffmpeg-src-$version" "$work/ffmpeg-$version.tar.xz"
   tar -xf "$work/ffmpeg-$version.tar.xz" -C "$work"
 fi
 

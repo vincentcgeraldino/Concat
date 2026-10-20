@@ -849,6 +849,34 @@ fn colour(hex: &str) -> Option<Color> {
     }
 }
 
+/// The em size a title falls back to when the style's is not a number.
+const DEFAULT_FONT_SIZE: f64 = 0.09;
+
+/// The most characters a title may hold. A title is a caption on a
+/// picture, and the layout measures each line as it builds it, so what a
+/// title costs grows with the square of its length: a paste of a whole
+/// chapter would take the window with it. Cut at a character boundary,
+/// and say that something was cut.
+const MAX_CHARS: usize = 2_000;
+
+/// `value` when it is a number, and `fallback` when it is not. A NaN
+/// where a size belongs poisons every metric computed from it, and a
+/// metric that is a NaN reaches the pixel buffer.
+fn finite(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() { value } else { fallback }
+}
+
+/// The text, at most [`MAX_CHARS`] characters, and an ellipsis when there
+/// was more.
+fn clipped(text: &str) -> String {
+    if text.chars().count() <= MAX_CHARS {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(MAX_CHARS - 1).collect();
+    out.push('…');
+    out
+}
+
 /// The same colour in the bytes a font's palette wants.
 fn rgba(color: Color) -> ttf_parser::RgbaColor {
     ttf_parser::RgbaColor::new(
@@ -1291,9 +1319,22 @@ fn paint(
 ) -> Result<(Pixmap, Block, Vec<WordRect>), Error> {
     let mut canvas = Pixmap::new(width, height).ok_or(Error::Canvas(width, height))?;
     let frame_h = height as f32;
-    let em = (style.font_size.clamp(0.005, 1.0) as f32) * frame_h;
-    let tracking = style.tracking as f32 * frame_h;
-    let pitch = em * (style.line_height.max(0.5) as f32);
+    // The title's words, cut to what a title may hold. The layout
+    // measures each line as it builds it, so what a title costs grows
+    // with the square of its length, and a paste of a whole chapter
+    // would take the window with it. Cut before the casting, which
+    // reads the same text, so the two agree on what was cut.
+    let mut style = style.clone();
+    style.content = clipped(&style.content);
+    let style = &style;
+    // The em size, and with it every metric below it. A size that is not
+    // a number - a hand-edited document, a caller in another language -
+    // would put a NaN in the baseline, and a path translated by a NaN is
+    // not a path: tiny-skia refuses it, and the title would take the app
+    // down with it. The size is floored and capped, as everywhere else.
+    let em = (finite(style.font_size, DEFAULT_FONT_SIZE).clamp(0.005, 1.0) as f32) * frame_h;
+    let tracking = finite(style.tracking, 0.0) as f32 * frame_h;
+    let pitch = em * (finite(style.line_height, 1.0).max(0.5) as f32);
 
     let casting = fonts.cast(style)?;
     let own = {
@@ -1410,7 +1451,11 @@ fn paint(
         // its anchor.
         Align::Left => anchor_x.min(width as f32 - outer_w).max(0.0),
         Align::Center => anchor_x - outer_w / 2.0,
-        Align::Right => (anchor_x - outer_w).max(0.0).min(width as f32 - outer_w),
+        // The same for the right-aligned one: the block's right edge sits
+        // on the anchor, and a block wider than the canvas slides back in
+        // rather than starting before the canvas and hanging off both
+        // sides.
+        Align::Right => (anchor_x - outer_w).min(width as f32 - outer_w).max(0.0),
     };
     let left = outer_left + pad_x;
     // The words are centred in a box taller than they are.
@@ -1431,11 +1476,16 @@ fn paint(
         };
         let baseline = top + ascent + row as f32 * pitch;
         if let Some(path) = &line.path {
-            let placed = path
+            // A path translated by a number that is not a number is not a
+            // path, and tiny-skia says so by giving None. The line is
+            // left undrawn rather than the title taking the app down
+            // with it.
+            if let Some(placed) = path
                 .clone()
                 .transform(Transform::from_translate(left + indent, baseline))
-                .expect("a translated glyph path stays finite");
-            words.push_path(&placed);
+            {
+                words.push_path(&placed);
+            }
         }
         let line_top = baseline - ascent;
         for &(start_x, end_x) in &line.words {
@@ -1929,6 +1979,33 @@ mod tests {
         }
     }
 
+    /// A title is a caption on a picture, and what it costs to lay out
+    /// grows with the square of its length: a paste of a whole chapter
+    /// would take the window with it. The words are cut to what a title
+    /// may hold, at a character boundary - a byte boundary could land
+    /// inside a character and leave half of one at the end.
+    #[test]
+    fn a_title_longer_than_a_title_is_cut() {
+        assert_eq!(clipped("short"), "short");
+        let long = "word ".repeat(1_000);
+        let cut = clipped(&long);
+        assert_eq!(cut.chars().count(), MAX_CHARS);
+        assert!(cut.ends_with('…'), "the cut says so");
+        // The cut lands on a character, not inside one: an emoji is one
+        // character and four bytes.
+        let emoji = "🎉".repeat(MAX_CHARS + 1);
+        let cut = clipped(&emoji);
+        assert_eq!(cut.chars().count(), MAX_CHARS);
+        assert!(cut.ends_with('…'));
+        // A title exactly at the limit is left alone.
+        let exact = "a".repeat(MAX_CHARS);
+        assert_eq!(clipped(&exact), exact);
+        // And a title that long still draws.
+        let fonts = Fonts::new();
+        let out = render(&fonts, &style(&long), 640, 360).expect("renders");
+        assert!(!out.words.is_empty());
+    }
+
     /// A limit narrower than the words wraps them: the block comes out no
     /// wider than the limit and taller than the one-line block.
     #[test]
@@ -2383,6 +2460,31 @@ mod tests {
             assert!(
                 centre - half >= -1 && centre + half <= width as i32 + 1,
                 "{align:?}"
+            );
+        }
+    }
+
+    /// A block wider than the canvas cannot fit, and slides back in: the
+    /// one anchored to the right used to start *before* the canvas and
+    /// hang off both sides, where the words were cut. The left-aligned
+    /// one already slid back in; the right-aligned one did not.
+    #[test]
+    fn a_block_wider_than_the_canvas_starts_on_it() {
+        let fonts = Fonts::new();
+        let (width, height) = (640, 360);
+        for align in [Align::Left, Align::Right] {
+            let mut wide = style("Escorpio - Casa 6 and Capricornio Cazimi");
+            wide.align = align;
+            wide.shadow = false;
+            // Wider than the canvas: the block cannot fit, and slides in.
+            wide.max_width = 1.4;
+            let out = render(&fonts, &wide, width, height).expect("renders");
+            let half = out.block_width as i32 / 2;
+            let centre = width as i32 / 2 + out.block_dx;
+            assert!(
+                centre - half >= -1,
+                "{align:?}: the block starts at {}, before the {width}-wide canvas",
+                centre - half
             );
         }
     }

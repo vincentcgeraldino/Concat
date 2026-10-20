@@ -33,7 +33,11 @@ on:
         required: true
 
 concurrency:
-  group: release-${{ github.ref }}
+  # The tag, not the ref: a release started by hand runs on the branch
+  # the page was opened from, and that branch's group would not be the
+  # tag's - so a re-release of a tag could run beside the tag's own
+  # release, and two of them would publish to one page.
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -134,6 +138,23 @@ jobs:
           fetch-depth: 0
           path: source
 
+      # Every bundle the notes name has to be there. A job that went
+      # green without producing its file - a step that wrote nothing, an
+      # upload that did not land - would otherwise publish a release
+      # whose download links are dead, and the notes promise each one by
+      # name. The manifest would not say: it leaves out a target that
+      # did not build, which is right for a manifest and wrong for a
+      # promise.
+      - name: Every bundle is there
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 source/scripts/models.py check-bundles \
+            --version "$VERSION" \
+            --bundles bundles
+          ls -l bundles
+
       # One file that says where every other one is: a row per bundle with
       # its size and digest, and a row per model with the mirror it is
       # fetched from. An updater or a package script reads this instead of
@@ -170,6 +191,17 @@ jobs:
           # Whether a certificate signed the Windows bundles: build-app.yml
           # leaves them unsigned, and says so, when the secret is unset.
           WINDOWS_SIGNED: ${{ secrets.WINDOWS_CERTIFICATE_PFX != '' }}
+          # Whether Apple's notary saw the macOS disk images. Signing and
+          # notarising are separate secrets, and the build does both when
+          # it can and skips both when it cannot: a bundle that is signed
+          # but not notarised still asks Gatekeeper for permission, and
+          # the notes have to say so.
+          MACOS_NOTARISED: ${{ secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+          # Whether the APK carries the repository's key. Without it the
+          # APK keeps the key made for the build, which no later release
+          # can install over - a person has to uninstall this one first,
+          # and the notes have to say so.
+          ANDROID_KEYED: ${{ secrets.ANDROID_KEYSTORE != '' }}
           # No launch check reaches the APK's own code until the emulator
           # runs a build of it it can execute (see smoke-android.sh).
           ANDROID_STARTED: "false"

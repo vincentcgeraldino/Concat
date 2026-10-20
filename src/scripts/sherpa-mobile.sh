@@ -22,7 +22,10 @@ set -euo pipefail
 target=${1:?target triple: aarch64-linux-android, x86_64-linux-android or aarch64-apple-ios}
 workspace=$(cd "$(dirname "$0")/.." && pwd)
 version=$(grep -A1 'name = "sherpa-onnx-sys"' "$workspace/Cargo.lock" | sed -n 's/^version = "\(.*\)"/\1/p')
-release=https://github.com/k2-fsa/sherpa-onnx/releases/download
+# The archives are fetched through scripts/ci/fetch.sh, which checks them
+# against the digest in scripts/ci/deps.lock: the bytes compiled into an
+# APK and an .ipa were whatever the download gave on the day.
+fetch=$workspace/scripts/ci/fetch.sh
 
 case "$target" in
   aarch64-linux-android|x86_64-linux-android)
@@ -39,8 +42,7 @@ case "$target" in
     host_tag=$(ls "$ndk/toolchains/llvm/prebuilt" | head -1)
     echo "Fetching sherpa-onnx $version for Android"
     mkdir -p "$out"
-    curl -fsSL --retry 5 --retry-all-errors -o "$out/sherpa-onnx-android.tar.bz2" \
-      "$release/v$version/sherpa-onnx-v$version-android.tar.bz2"
+    "$fetch" sherpa-onnx-android "$out/sherpa-onnx-android.tar.bz2"
     tar -xjf "$out/sherpa-onnx-android.tar.bz2" -C "$out"
     rm "$out/sherpa-onnx-android.tar.bz2"
     # Only the ABI the app is built for ships; the rest is left behind.
@@ -57,8 +59,7 @@ case "$target" in
     out=${2:-$workspace/vendor/sherpa-onnx/ios}
     echo "Fetching sherpa-onnx $version for iOS"
     mkdir -p "$out"
-    curl -fsSL --retry 5 --retry-all-errors -o "$out/sherpa-onnx-ios.zip" \
-      "$release/xcframework/sherpa-onnx-v$version-ios-shared-onnxruntime-static.xcframework.zip"
+    "$fetch" sherpa-onnx-ios-xcframework "$out/sherpa-onnx-ios.zip"
     (cd "$out" && unzip -qo sherpa-onnx-ios.zip && rm sherpa-onnx-ios.zip)
     framework=$(find "$out" -maxdepth 2 -name '*.xcframework' | head -1)
     [ -n "$framework" ] || { echo "no xcframework in the archive" >&2; exit 1; }

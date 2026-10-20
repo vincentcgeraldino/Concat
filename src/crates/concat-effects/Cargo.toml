@@ -17,5 +17,10 @@ thiserror.workspace = true
 # Manifests are TOML: the format people hand-write. Project files stay JSON.
 toml = "1.1"
 
+# The build script reads the manifests to find each package's shader, so
+# that a package may name its own file rather than being told `effect.wgsl`.
+[build-dependencies]
+toml = "1.1"
+
 [lints]
 workspace = true

@@ -221,7 +221,11 @@ jobs:
       - name: The pinned toolchain
         id: toolchain
         shell: bash
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)
+          if [ -z "$channel" ]; then echo "::error::no channel in src/rust-toolchain.toml"; exit 1; fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (v1), 2026-10-09
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -653,6 +657,19 @@ jobs:
           # an older one the AI features say so instead.
           scripts/ci/check-min-os.sh "$app" "$MACOSX_DEPLOYMENT_TARGET" ${lazy[@]+"${lazy[@]}"}
 
+          # The floor the bundle really has, declared as such. The
+          # libraries above are built for the runner's macOS - Homebrew's
+          # FFmpeg is - so a bundle that claims macOS 12 dies on 12, 13
+          # and 14, and says so nowhere until it does. Declaring the
+          # floor turns that into the system's own "this app needs a
+          # newer macOS", which is a thing a person can act on, and it
+          # happens before the bundle is signed below.
+          floor=$(scripts/ci/check-min-os.sh "$app" "$MACOSX_DEPLOYMENT_TARGET" --floor ${lazy[@]+"${lazy[@]}"})
+          if [ "$floor" != "$MACOSX_DEPLOYMENT_TARGET" ]; then
+            /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $floor" "$app/Contents/Info.plist"
+            echo "the bundle declares macOS $floor, the newest its libraries need"
+          fi
+
       # Signed with the repository's Developer ID when it has one, and
       # notarised so Gatekeeper opens it without a warning; ad-hoc signed
       # otherwise, which is what a fork's build gets. Either way the
@@ -939,9 +956,16 @@ jobs:
       # declares, and both start (`--version`, and `--smoke` under Xvfb).
       # A library the package forgot to depend on fails here rather than
       # on somebody's machine. See scripts/ci/smoke-linux.sh.
+      #
+      # And the other two packages, each in the distribution it is for:
+      # the .rpm installed by dnf, the Arch package by pacman. Their
+      # dependencies are named as that distribution names them, and only
+      # that distribution's tool can say whether those names exist: a .rpm
+      # that asked for a package RPM does not have installed cleanly
+      # nowhere and would not run anywhere.
       - name: Smoke test in clean distributions (Linux)
         if: matrix.platform == 'linux'
-        timeout-minutes: 25
+        timeout-minutes: 45
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -951,6 +975,10 @@ jobs:
               "stage/Concat-${VERSION}-linux-${{ matrix.arch }}.deb" \
               "stage/Concat-${VERSION}-${{ matrix.arch }}.AppImage"
           done
+          scripts/ci/smoke-linux.sh --container-rpm fedora:latest \
+            "stage/Concat-${VERSION}-linux-${{ matrix.arch }}.rpm"
+          scripts/ci/smoke-linux.sh --container-pacman archlinux:latest \
+            "stage/Concat-${VERSION}-linux-${{ matrix.arch }}.pkg.tar.zst"
 
       # ── Package: Windows ───────────────────────────────────────────────
       # The folder the installers are made from: the program, FFmpeg's
@@ -1126,6 +1154,20 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $name = "Concat-$env:VERSION-windows-${{ matrix.arch }}"
+          # A version the installers can carry. An .msi's version is
+          # three numbers and nothing else, and a pre-release suffix is
+          # not one: WiX refuses to build it, and Inno Setup writes
+          # 0.0.0.0 into the file's properties without saying so. The
+          # installers carry the numbers; the file name keeps the whole
+          # of it, so the release still says which one it is.
+          $numeric = ($env:VERSION -split '[-+]', 2)[0]
+          if ($numeric -ne $env:VERSION) {
+            Write-Host "::warning::$env:VERSION carries a suffix the installers cannot; they carry $numeric"
+          }
+          # Windows' own version fields are four numbers.
+          $fields = $numeric.Split('.')
+          while ($fields.Count -lt 4) { $fields += '0' }
+          $versionInfo = ($fields -join '.')
           function Sign($file) {
             if (-not $env:SIGNING_THUMBPRINT) { return }
             & $env:SIGNTOOL sign /sha1 $env:SIGNING_THUMBPRINT /s My /fd SHA256 `
@@ -1141,7 +1183,7 @@ jobs:
             choco install innosetup --no-progress -y | Out-Null
           }
           if (-not (Test-Path $iscc)) { throw "Inno Setup is not at $iscc" }
-          & $iscc "/DVersion=$env:VERSION" "/DArch=${{ matrix.inno }}" "/DSuffix=${{ matrix.arch }}" `
+          & $iscc "/DVersion=$env:VERSION" "/DVersionInfo=$versionInfo" "/DArch=${{ matrix.inno }}" "/DSuffix=${{ matrix.arch }}" `
             "/DStage=$PWD\stage\$name" "/DOut=$PWD\stage" assets\windows\concat.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with $LASTEXITCODE" }
           if (-not (Test-Path "stage\$name-setup.exe")) { throw "stage\$name-setup.exe is not there" }
@@ -1151,7 +1193,7 @@ jobs:
           dotnet tool install --global wix --version $env:WIX_VERSION | Out-Null
           # No .wixpdb: everything in stage/ is published, and a debug
           # database for the installer is nothing a release should carry.
-          wix build -arch ${{ matrix.wix }} -pdbtype none "-d" "Version=$env:VERSION" "-d" "Root=$PWD" "-d" "Stage=$PWD\stage\$name" `
+          wix build -arch ${{ matrix.wix }} -pdbtype none "-d" "Version=$numeric" "-d" "Root=$PWD" "-d" "Stage=$PWD\stage\$name" `
             -o "stage\$name.msi" assets\windows\concat.wxs
           if ($LASTEXITCODE -ne 0) { throw "WiX failed with $LASTEXITCODE" }
           if (-not (Test-Path "stage\$name.msi")) { throw "stage\$name.msi is not there" }
@@ -1159,13 +1201,31 @@ jobs:
           # The folder itself is not published: the two installers are.
           Remove-Item -Recurse -Force "stage\$name"
 
+      # The installers, installed. The staged folder was launched before
+      # it was packaged, but the installers themselves were never run: a
+      # file left out of the package, a Start menu entry for a program
+      # that is not there, and nothing would have said so until somebody
+      # downloaded the file. So they are installed, the program is run
+      # from where the installer put it, and the installer is asked to
+      # take it away again.
+      - name: Install the installers (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $name = "Concat-$env:VERSION-windows-${{ matrix.arch }}"
+          scripts/ci/smoke-windows-install.ps1 `
+            -Setup "stage\$name-setup.exe" `
+            -Msi "stage\$name.msi"
+
       # The signing certificate out of the user's store again, whether the
       # steps above passed or not.
       - name: Forget the certificate (Windows)
         if: always() && matrix.platform == 'windows' && env.SIGNING_THUMBPRINT != ''
         shell: pwsh
         run: Remove-Item -Force -DeleteKey "Cert:\CurrentUser\My\$env:SIGNING_THUMBPRINT"
-
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Concat-${{ matrix.platform }}-${{ matrix.arch }}

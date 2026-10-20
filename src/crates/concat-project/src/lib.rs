@@ -1357,6 +1357,33 @@ mod tests {
         assert_eq!(nan.max_height, 0.0);
     }
 
+    /// A title is a caption on a picture, and what it costs to lay out
+    /// grows with the square of its length: a paste of a whole chapter
+    /// would take the window with it. The words are cut to what a title
+    /// may hold, at a character boundary - a byte boundary could land
+    /// inside a character and leave half of one at the end.
+    #[test]
+    fn a_title_longer_than_a_title_is_cut() {
+        let long = TextStyle {
+            content: "word ".repeat(1_000),
+            ..TextStyle::default()
+        }
+        .tidy();
+        assert!(
+            long.content.chars().count() <= 2_000,
+            "{} characters",
+            long.content.chars().count()
+        );
+        assert!(long.content.ends_with('…'), "the cut says so");
+        // A title of a normal length is not touched.
+        let short = TextStyle {
+            content: "Your text".to_owned(),
+            ..TextStyle::default()
+        }
+        .tidy();
+        assert_eq!(short.content, "Your text");
+    }
+
     /// A hand-edited clip time has a ceiling as well as a floor: `1e300`
     /// loaded as written, its frame number saturated, and the export
     /// panicked computing its time (audit 2026-10-09, finding 9).

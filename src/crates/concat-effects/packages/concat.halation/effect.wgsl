@@ -72,7 +72,13 @@ fn across(uv: vec2<f32>) -> vec4<f32> {
 fn down(uv: vec2<f32>) -> vec4<f32> {
     let rows = 1.0 / across_texel().y;
     let screen = length((uv - vec2<f32>(0.5)) * vec2<f32>(2.0));
-    let sigma = params.radius / 100.0 * screen * 2.0;
+    // The reach of the blur across, in this picture's own rows. The
+    // `across` pass measures in layer pixels and this one in across-rows,
+    // so the radius is converted on the way - the same `rows /
+    // frame.size.y` the sibling packages use. It was a plain 2.0, which is
+    // not a length of anything: the halo reached eighty-six times further
+    // sideways than down, and drew a streak rather than a glow.
+    let sigma = params.radius / 100.0 * screen * rows / TAU;
     let centre = uv.y * rows;
     let first = floor(centre - TAU * sigma - 0.5) + 0.5;
     let pairs = i32(ceil(TAU * sigma)) + 1;

@@ -44,3 +44,14 @@ for size in "${SIZES[@]}"; do
   resize "$size" "$dest"
   echo "wrote $dest"
 done
+
+# The iOS icon, which is the same logo with the brand blue under its
+# transparent corners: iOS shows an icon with transparent corners as
+# black ones, and the system does the rounding itself.
+if command -v python3 >/dev/null 2>&1; then
+  python3 "$(dirname "${BASH_SOURCE[0]}")/make-ios-icon.py" \
+    --source "$OUT/${base}_512.png" \
+    --out "$OUT/${base}_512_ios.png"
+else
+  echo "note: no python3, so the iOS icon was not made" >&2
+fi

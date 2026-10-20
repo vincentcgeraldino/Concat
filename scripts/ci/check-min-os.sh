@@ -3,6 +3,7 @@
 # says it runs on.
 #
 # Usage: check-min-os.sh <bundle> <declared-minimum> [--enforce]
+#                        [--floor]
 #                        [--lazy <path in the bundle>]...
 #
 # A bundle declares its floor once (LSMinimumSystemVersion on a Mac,
@@ -15,6 +16,12 @@
 #
 # Lists each file whose own minimum is newer than the declared one, as a
 # warning, in the job summary too. With --enforce, any such file fails.
+#
+# With --floor, prints the newest macOS any file loaded at launch needs -
+# the floor the bundle really has - and stops there. A bundle that
+# declares less than that is a bundle that dies on the system it claims:
+# the caller sets the declaration to the floor, and the system says so
+# rather than the app dying on launch.
 #
 # A --lazy file is one the app opens itself, at first use, and only on a
 # system at least as new as the minimum in that file's own header - the
@@ -29,10 +36,12 @@ bundle="$1"
 declared="$2"
 shift 2
 enforce=
+floor_only=
 lazy=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --enforce) enforce=--enforce ;;
+    --floor) floor_only=1 ;;
     --lazy) lazy+=("$2"); shift ;;
     *) echo "check-min-os: unknown argument $1" >&2; exit 2 ;;
   esac
@@ -66,21 +75,39 @@ for path in ${lazy[@]+"${lazy[@]}"}; do
     echo "check-min-os: $path, loaded at first use, is not in $bundle" >&2
     exit 1
   fi
-  echo "check-min-os: $path is loaded at first use, on macOS $(minimum_of "$bundle/$path") or later"
+  # In --floor mode the floor is the only thing on stdout: the caller
+  # reads it into a variable, and a notice among the lines would go
+  # into it with them.
+  if [ -n "$floor_only" ]; then
+    echo "check-min-os: $path is loaded at first use, on macOS $(minimum_of "$bundle/$path") or later" >&2
+  else
+    echo "check-min-os: $path is loaded at first use, on macOS $(minimum_of "$bundle/$path") or later"
+  fi
 done
 
 over=()
 checked=0
+floor="$declared"
 while IFS= read -r -d '' file; do
   file -b "$file" | grep -q 'Mach-O' || continue
   is_lazy "${file#"$bundle"/}" && continue
   checked=$((checked + 1))
   own=$(minimum_of "$file")
   [ -n "$own" ] || continue
+  if [ "$(newer "$own" "$floor")" = "$own" ]; then
+    floor="$own"
+  fi
   if [ "$own" != "$declared" ] && [ "$(newer "$own" "$declared")" = "$own" ]; then
     over+=("${file#"$bundle"/} needs $own")
   fi
 done < <(find "$bundle" -type f -print0)
+
+if [ -n "$floor_only" ]; then
+  # The floor the bundle really has, and nothing else: the caller sets
+  # the declaration to it.
+  printf '%s\n' "$floor"
+  exit 0
+fi
 
 echo "check-min-os: $checked Mach-O files in $bundle loaded at launch, declared minimum $declared"
 if [ "${#over[@]}" -eq 0 ]; then

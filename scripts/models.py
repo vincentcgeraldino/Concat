@@ -6,6 +6,8 @@
     scripts/models.py release-manifest \\
         --version 0.2.1 --tag v0.2.1 \\
         --bundles dir --out manifest.json     # what a release describes
+    scripts/models.py check-bundles \\
+        --version 0.2.1 --bundles dir        # whether they are all there
 
 Concat fetches its cutout networks, its Kokoro voice bank and its whisper
 models on demand rather than carrying them in the bundle. models/manifest.toml
@@ -69,6 +71,13 @@ BUNDLES = [
     ("android", "arm64", "apk", "Concat-{v}-android-arm64.apk"),
     ("ios", "arm64", "ipa", "Concat-{v}-ios-arm64.ipa"),
 ]
+
+# The targets no build produces yet. Their rows stay in the table so the
+# manifest's shape is complete, but a release does not promise them: the
+# Windows-on-ARM build died on `--version` (#326) and its row is out of
+# the matrix until it does not. The notes do not name them either, and
+# `check-bundles` does not ask for them.
+DEFERRED = {("windows", "aarch64")}
 
 
 def table() -> dict:
@@ -384,6 +393,45 @@ def release_manifest(version: str, tag: str, bundles: pathlib.Path | None) -> di
     }
 
 
+def check_bundles(version: str, bundles: pathlib.Path) -> int:
+    """Whether every bundle a release promises is there, whole.
+
+    The manifest leaves out a target that did not build, and the notes
+    name every bundle the release is to carry: a link to a file nobody
+    can fetch is worse than no release at all. A build that fails stops
+    the release before it starts; this is the other end of it, for the
+    case where a job went green without producing its file.
+    """
+    missing: list[str] = []
+    empty: list[str] = []
+    deferred: list[str] = []
+    for platform, arch, kind, stem in BUNDLES:
+        file = stem.format(v=version)
+        if (platform, arch) in DEFERRED:
+            deferred.append(file)
+            continue
+        path = bundles / file
+        if not path.exists():
+            missing.append(file)
+        elif path.stat().st_size == 0:
+            empty.append(file)
+    for file in missing:
+        print(f"missing bundle: {file}", file=sys.stderr)
+    for file in empty:
+        print(f"empty bundle: {file}", file=sys.stderr)
+    if deferred:
+        print(f"not built yet, and not promised: {', '.join(deferred)}")
+    promised = len(BUNDLES) - len(deferred)
+    if missing or empty:
+        print(
+            f"{len(missing)} of {promised} bundles missing, {len(empty)} empty",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"{promised} bundles, all present")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="the table against the engine")
@@ -399,9 +447,17 @@ def main() -> int:
     emit.add_argument("--bundles", type=pathlib.Path)
     emit.add_argument("--out", type=pathlib.Path)
 
+    bundles = sub.add_parser(
+        "check-bundles", help="whether every bundle a release promises is there"
+    )
+    bundles.add_argument("--version", required=True)
+    bundles.add_argument("--bundles", type=pathlib.Path, required=True)
+
     args = parser.parse_args()
     if args.command == "mirror":
         return mirror(args.out, args.only)
+    if args.command == "check-bundles":
+        return check_bundles(args.version, args.bundles)
     if args.command == "release-manifest":
         manifest = release_manifest(args.version, args.tag, args.bundles)
         text = json.dumps(manifest, indent=2) + "\n"

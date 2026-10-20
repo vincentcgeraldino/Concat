@@ -385,14 +385,40 @@ impl Expr {
     }
 }
 
+/// A real number FFmpeg can read. Infinity and NaN are refused: they
+/// reach the filtergraph as the text "inf" and "NaN", which FFmpeg cannot
+/// parse, so the export dies with a message about a filter rather than
+/// about the expression that made it.
+fn finite(value: f64, what: &str) -> Result<f64, EvalError> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(EvalError(format!("{what}: {value} is not a number")))
+    }
+}
+
+/// The same, as a value.
+fn real(value: f64, what: &str) -> Result<Value, EvalError> {
+    Ok(Value::Float(finite(value, what)?))
+}
+
 fn binary(op: Op, left: &Value, right: &Value) -> Result<Value, EvalError> {
     if let (Value::Int(a), Value::Int(b)) = (left, right) {
         let (a, b) = (*a, *b);
+        // Whole numbers stay whole, and a product of two large ones is
+        // refused rather than wrapped: a wrapped number is a wrong number
+        // in the graph, with nothing to say so.
+        let too_large = || EvalError("the number is too large".to_owned());
         return Ok(match op {
-            Op::Add => Value::Int(a + b),
-            Op::Sub => Value::Int(a - b),
-            Op::Mul => Value::Int(a * b),
-            Op::Div => Value::Float(a as f64 / b as f64),
+            Op::Add => Value::Int(a.checked_add(b).ok_or_else(too_large)?),
+            Op::Sub => Value::Int(a.checked_sub(b).ok_or_else(too_large)?),
+            Op::Mul => Value::Int(a.checked_mul(b).ok_or_else(too_large)?),
+            Op::Div => {
+                if b == 0 {
+                    return Err(EvalError("division by zero".to_owned()));
+                }
+                Value::Float(a as f64 / b as f64)
+            }
             Op::Lt => Value::Int(i64::from(a < b)),
             Op::Gt => Value::Int(i64::from(a > b)),
             Op::Le => Value::Int(i64::from(a <= b)),
@@ -401,13 +427,18 @@ fn binary(op: Op, left: &Value, right: &Value) -> Result<Value, EvalError> {
             Op::Ne => Value::Int(i64::from(a != b)),
         });
     }
-    let a = left.as_f64("operator")?;
-    let b = right.as_f64("operator")?;
+    let a = finite(left.as_f64("operator")?, "operator")?;
+    let b = finite(right.as_f64("operator")?, "operator")?;
     Ok(match op {
-        Op::Add => Value::Float(a + b),
-        Op::Sub => Value::Float(a - b),
-        Op::Mul => Value::Float(a * b),
-        Op::Div => Value::Float(a / b),
+        Op::Add => real(a + b, "the sum")?,
+        Op::Sub => real(a - b, "the difference")?,
+        Op::Mul => real(a * b, "the product")?,
+        Op::Div => {
+            if b == 0.0 {
+                return Err(EvalError("division by zero".to_owned()));
+            }
+            real(a / b, "the quotient")?
+        }
         Op::Lt => Value::Int(i64::from(a < b)),
         Op::Gt => Value::Int(i64::from(a > b)),
         Op::Le => Value::Int(i64::from(a <= b)),
@@ -418,11 +449,14 @@ fn binary(op: Op, left: &Value, right: &Value) -> Result<Value, EvalError> {
 }
 
 fn truthy(value: &Value) -> Result<bool, EvalError> {
-    Ok(value.as_f64("if")? != 0.0)
+    // A NaN is not zero, so `!= 0.0` would call it true - and the branch it
+    // takes would be the wrong one. Refused instead.
+    Ok(finite(value.as_f64("if")?, "if")? != 0.0)
 }
 
 fn call(name: &str, args: &[Value]) -> Result<Value, EvalError> {
-    let num = |i: usize| args[i].as_f64(name);
+    // Every argument is a real number before anything is done with it.
+    let num = |i: usize| args[i].as_f64(name).and_then(|x| finite(x, name));
     Ok(match name {
         "if" => {
             if truthy(&args[0])? {
@@ -463,8 +497,25 @@ fn call(name: &str, args: &[Value]) -> Result<Value, EvalError> {
         "ceil" => Value::Int(num(0)?.ceil() as i64),
         // Nearest integer, halves away from zero.
         "round" => Value::Int(num(0)?.round() as i64),
-        "sqrt" => Value::Float(num(0)?.sqrt()),
-        "pow" => Value::Float(num(0)?.powf(num(1)?)),
+        // The root of a negative number is not a number, and the square
+        // of a negative one is only a number where the exponent is a
+        // whole number. Both would reach the graph as "NaN".
+        "sqrt" => {
+            let value = num(0)?;
+            if value < 0.0 {
+                return Err(EvalError(format!("sqrt: {value} has no square root")));
+            }
+            Value::Float(value.sqrt())
+        }
+        "pow" => {
+            let (base, exponent) = (num(0)?, num(1)?);
+            if base < 0.0 && exponent.fract() != 0.0 {
+                return Err(EvalError(format!(
+                    "pow: {base} to the power {exponent} is not a number"
+                )));
+            }
+            Value::Float(base.powf(exponent))
+        }
         "fixed" => {
             let digits = num(1)?;
             if digits < 0.0 || digits.fract() != 0.0 || digits > 20.0 {
@@ -496,6 +547,67 @@ mod tests {
             .expect("parses")
             .eval(&env)
             .expect("evaluates")
+    }
+
+    /// The error an expression gives, or None when it evaluates.
+    fn error(source: &str, vars: &[(&str, Value)]) -> Option<String> {
+        let env: BTreeMap<String, Value> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.clone()))
+            .collect();
+        Expr::parse(source)
+            .expect("parses")
+            .eval(&env)
+            .err()
+            .map(|error| error.to_string())
+    }
+
+    /// A number that is not a number, or a number past what the graph can
+    /// read, must be refused: `inf` and `NaN` reach the filtergraph as
+    /// text, and FFmpeg cannot parse them - the export dies with a
+    /// message about a filter rather than about the expression.
+    #[test]
+    fn a_number_that_is_not_a_number_is_refused() {
+        // Division by zero.
+        assert!(error("1 / 0", &[]).is_some());
+        assert!(error("1 / 0.0", &[]).is_some());
+        assert!(error("round(1) / round(0)", &[]).is_some());
+        // A parameter at zero.
+        assert!(error("1 / speed", &[("speed", Value::Float(0.0))]).is_some());
+        // The root of a negative number.
+        assert!(error("sqrt(0 - 1)", &[]).is_some());
+        // A negative base to a power that is not a whole number.
+        assert!(error("pow(0 - 1, 0.5)", &[]).is_some());
+        // But a whole exponent is a number.
+        assert_eq!(eval("pow(0 - 2, 3)", &[]), Value::Float(-8.0));
+        // And a division that works is still a division.
+        assert_eq!(eval("1 / 2", &[]), Value::Float(0.5));
+    }
+
+    /// A whole number too large for the arithmetic is refused rather than
+    /// wrapped: a wrapped number is a wrong number in the graph, with
+    /// nothing to say so.
+    #[test]
+    fn a_whole_number_too_large_is_refused() {
+        let big = Value::Int(i64::MAX);
+        assert!(error("big * big", &[("big", big)]).is_some());
+        assert!(error("big + big", &[("big", Value::Int(i64::MAX))]).is_some());
+        // And one that is merely large is fine. A literal is a real
+        // number, so `round` is what makes the arithmetic whole.
+        assert_eq!(
+            eval("round(1000000) * round(1000000)", &[]),
+            Value::Int(1000000000000)
+        );
+    }
+
+    /// A number that is not finite cannot be printed into a graph.
+    #[test]
+    fn an_unprintable_number_is_refused() {
+        assert!(error("fixed(1 / 0, 2)", &[]).is_some());
+        assert!(error("floor(1 / 0)", &[]).is_some());
+        assert!(error("round(1 / 0)", &[]).is_some());
+        // A NaN is not zero, so `if` would take the true branch on it.
+        assert!(error("if(1 / 0, 1, 2)", &[]).is_some());
     }
 
     #[test]

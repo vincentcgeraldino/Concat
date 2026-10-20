@@ -7,7 +7,10 @@ struct Params { strength: f32 }
 // times its size.
 fn effect(uv: vec2<f32>) -> vec4<f32> {
     let s = params.strength / 100.0 * 0.6;
-    let aspect = frame.size.x / frame.size.y;
+    // The frame's own shape, with the divisor floored: every other
+    // package here guards it, and a layer with no height would divide
+    // by zero and sample one point for the whole picture.
+    let aspect = frame.size.x / max(frame.size.y, 1.0);
     // Out from the middle, in units where a corner is 1.
     let p = (uv - vec2<f32>(0.5)) * vec2<f32>(aspect, 1.0);
     let corner = length(vec2<f32>(aspect, 1.0) * 0.5);

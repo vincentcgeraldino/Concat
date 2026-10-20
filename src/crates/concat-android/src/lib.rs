@@ -15,6 +15,35 @@
 //! prints to stderr are forwarded to logcat under the `concat` tag, which
 //! is where `adb logcat -s concat` reads a report from.
 
+/// The activity the app is on now.
+///
+/// `android_main` can run more than once in a process: the person leaves
+/// the app, the system keeps the process, and the launcher brings the app
+/// back on it with a new activity. Each call is given its own
+/// `AndroidApp`, and the one the first call was given is dead by the
+/// second. A hook that keeps the activity it was given talks to a dead
+/// one: the picker opens and the answer is delivered to an activity that
+/// is gone, so the import does nothing, and keeps doing nothing; the
+/// microphone's question is put to nobody. So the current activity is
+/// held here, and every hook reads it when it is called rather than
+/// keeping the one it was installed with.
+#[cfg(target_os = "android")]
+static CURRENT: std::sync::Mutex<Option<slint::android::AndroidApp>> = std::sync::Mutex::new(None);
+
+/// Remembers the activity the app is on now.
+#[cfg(target_os = "android")]
+fn set_current_activity(app: &slint::android::AndroidApp) {
+    if let Ok(mut slot) = CURRENT.lock() {
+        *slot = Some(app.clone());
+    }
+}
+
+/// The activity as it is now, for a hook that needs one.
+#[cfg(target_os = "android")]
+fn current_activity() -> Option<slint::android::AndroidApp> {
+    CURRENT.lock().ok().and_then(|slot| slot.clone())
+}
+
 #[cfg(target_os = "android")]
 mod activity {
     use std::io::BufRead;
@@ -26,8 +55,11 @@ mod activity {
             return;
         };
         // What the phone keeps for the app: settings, recents, models.
-        // SAFETY: called from android_main before the window or any worker
-        // thread starts, so no other thread reads the environment.
+        // SAFETY: called from android_main before the window, the host or
+        // any worker thread of ours starts, so no thread of ours reads
+        // the environment. The phone's own runtime is already running -
+        // it is what called us - and it read the environment it was
+        // given when it started, before this call.
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", &internal);
             std::env::set_var("XDG_DATA_HOME", &internal);
@@ -85,11 +117,27 @@ mod activity {
         std::thread::Builder::new()
             .name("stderr-to-logcat".into())
             .spawn(move || {
-                for line in std::io::BufReader::new(reader)
-                    .lines()
-                    .map_while(Result::ok)
-                {
-                    log::warn!("{line}");
+                // Read the bytes, not the lines: a line that is not
+                // valid UTF-8 ended the reading, because the iterator
+                // stops at the first error, and everything after it was
+                // lost - the panic message, the crash handler's line, and
+                // every word a dependency wrote. The Android smoke test
+                // looks for the panic in there.
+                let mut reader = std::io::BufReader::new(reader);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    match reader.read_until(b'\n', &mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let text = String::from_utf8_lossy(&line);
+                            log::warn!("{}", text.trim_end());
+                        }
+                        Err(error) => {
+                            log::warn!("stderr: {error}");
+                            break;
+                        }
+                    }
                 }
             })
             .ok();
@@ -219,25 +267,46 @@ mod picker {
 
     /// Hands the window's crate a picker that runs on this activity.
     pub fn install(app: &AndroidApp) {
-        let app = app.clone();
+        super::set_current_activity(app);
         concat::install_file_picker(Box::new(move |kinds, on_picked| {
+            // A lock poisoned by an earlier panic still holds the pick:
+            // refusing to register this one would leave the window
+            // waiting for an answer that goes nowhere.
             let previous = PENDING
                 .lock()
-                .map(|mut slot| slot.replace(on_picked))
-                .ok()
-                .flatten();
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .replace(on_picked);
             if let Some(previous) = previous {
                 // A pick was already up; the one that asked first is told
                 // it got nothing rather than left waiting for ever.
                 previous(Vec::new());
             }
+            // The activity as it is now, not the one this closure was
+            // given: the app may have been brought back since.
+            let app = super::current_activity();
+            let Some(app) = app else {
+                log::error!("the app has no activity to pick a file with");
+                if let Some(pending) = take_pending() {
+                    pending(Vec::new());
+                }
+                return;
+            };
             if let Err(error) = pick(&app, &kinds) {
                 log::error!("could not show the document picker: {error}");
-                if let Some(pending) = PENDING.lock().ok().and_then(|mut slot| slot.take()) {
+                if let Some(pending) = take_pending() {
                     pending(Vec::new());
                 }
             }
         }));
+    }
+
+    /// The pick waiting for an answer, if there is one. A poisoned lock
+    /// is not a reason to leave the window waiting for ever.
+    fn take_pending() -> Option<Picked> {
+        PENDING
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
     }
 
     fn pick(app: &AndroidApp, kinds: &concat::PickKinds) -> jni::errors::Result<()> {
@@ -284,6 +353,12 @@ mod picker {
         _class: sys::jclass,
         paths: sys::jobjectArray,
     ) {
+        // A panic must not leave this frame. It is called from Java, and
+        // a Rust panic unwinding into the JVM is an abort: the phone
+        // loses the app, and the pick that was waiting for an answer
+        // waits for ever. So the reading is caught, the answer is still
+        // given - empty, if it could not be read - and the window's own
+        // callback is caught too.
         let read = JavaVM::singleton().and_then(|vm| {
             vm.attach_current_thread(|env| {
                 // SAFETY: `paths` is the argument Java handed this frame.
@@ -303,8 +378,13 @@ mod picker {
                 Vec::new()
             }
         };
-        if let Some(pending) = PENDING.lock().ok().and_then(|mut slot| slot.take()) {
-            pending(paths);
+        // The lock may be poisoned by a panic in an earlier pick, and a
+        // poisoned lock is not a reason to leave the window waiting.
+        if let Some(pending) = take_pending() {
+            let given = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pending(paths)));
+            if given.is_err() {
+                log::error!("the pick callback panicked");
+            }
         }
     }
 }
@@ -450,8 +530,14 @@ mod microphone {
 
     /// Hands the window's crate the way to ask.
     pub fn install(app: &AndroidApp) {
-        let app = app.clone();
+        super::set_current_activity(app);
         concat::install_microphone_access(Box::new(move || {
+            // The activity as it is now: the question is put to the
+            // activity the app is on, and a dead one never asks.
+            let Some(app) = super::current_activity() else {
+                log::warn!("the app has no activity to ask for the microphone with");
+                return true;
+            };
             super::java::with_class(&app, |env, activity, class| {
                 env.call_static_method(
                     class,
@@ -481,8 +567,11 @@ mod links {
 
     /// Hands the window's crate the way to open a web address.
     pub fn install(app: &AndroidApp) {
-        let app = app.clone();
+        super::set_current_activity(app);
         concat::install_link_opener(Box::new(move |url| {
+            let Some(app) = super::current_activity() else {
+                return Err("the app has no activity to open a link with".to_owned());
+            };
             let answer = super::java::with_class(&app, |env, activity, class| {
                 let url = env.new_string(url)?;
                 let answer = env

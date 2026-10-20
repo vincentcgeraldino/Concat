@@ -11,6 +11,23 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+/// The shader file the manifest names: the `[wgsl]` table's entry, or the
+/// `[transition]` table's. None when the manifest names neither - a
+/// package with only an FFmpeg chain has no shader.
+fn shader_entry(manifest: &str) -> Option<String> {
+    let value: toml::Value = toml::from_str(manifest).ok()?;
+    for table in ["wgsl", "transition"] {
+        if let Some(entry) = value
+            .get(table)
+            .and_then(|table| table.get("entry"))
+            .and_then(|entry| entry.as_str())
+        {
+            return Some(entry.to_owned());
+        }
+    }
+    None
+}
+
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let packages = root.join("packages");
@@ -44,12 +61,18 @@ fn main() {
         } else {
             "None".to_owned()
         };
-        let shader = dir.join("effect.wgsl");
-        let shader = if shader.is_file() {
-            println!("cargo:rerun-if-changed={}", shader.display());
-            format!("Some(include_str!({:?}))", shader.display().to_string())
-        } else {
-            "None".to_owned()
+        // The shader is the file the manifest names, not a name this
+        // script decides: a built-in whose shader is called something else
+        // used to be embedded with no shader at all, and the catalogue
+        // panicked on it when the app first asked for its effects.
+        let manifest_text = std::fs::read_to_string(&manifest).expect("the manifest is there");
+        let shader = shader_entry(&manifest_text).map(|entry| dir.join(entry));
+        let shader = match shader {
+            Some(shader) => {
+                println!("cargo:rerun-if-changed={}", shader.display());
+                format!("Some(include_str!({:?}))", shader.display().to_string())
+            }
+            None => "None".to_owned(),
         };
         writeln!(
             table,

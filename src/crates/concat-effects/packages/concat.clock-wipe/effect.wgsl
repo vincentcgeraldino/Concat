@@ -7,7 +7,11 @@ fn transition(uv: vec2<f32>, progress: f32) -> vec4<f32> {
         return to_at(uv);
     }
     let c = (uv - vec2<f32>(0.5)) * frame.size;
-    var a = atan2(c.x, -c.y);
+    // The angle of a vector that is nothing is not a number: `atan2` of
+    // two zeroes is left to the driver, and a driver that answers NaN
+    // would put a NaN pixel in the middle of the frame. The hand's
+    // angle is twelve o'clock there.
+    var a = select(atan2(c.x, -c.y), 0.0, all(c == vec2<f32>(0.0)));
     if (a < 0.0) {
         a = a + 6.28318530718;
     }

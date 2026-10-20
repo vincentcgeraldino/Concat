@@ -99,6 +99,23 @@ impl AppDirs {
             self.data.clone()
         }
     }
+
+    /// Where state that belongs to this machine alone is kept: the file
+    /// that says where the server is and the token that opens it.
+    ///
+    /// Windows' config folder roams - it is copied to the next machine the
+    /// domain profile reaches - and a token that opens the editor has no
+    /// business travelling that way. The data folder is local by
+    /// construction: the models and caches that fill it are already
+    /// machine-local. Everywhere else the config folder is the machine's
+    /// own already, and a phone's is the one place that keeps things.
+    pub fn private(&self) -> &Path {
+        if cfg!(windows) {
+            &self.data
+        } else {
+            &self.config
+        }
+    }
 }
 
 /// The folders under `data`, each named where it is made: models, caches

@@ -52,7 +52,11 @@ jobs:
       # stable installed here would only be fetched and left.
       - name: The pinned toolchain
         id: toolchain
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)
+          if [ -z "$channel" ]; then echo "::error::no channel in src/rust-toolchain.toml"; exit 1; fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (v1), 2026-10-09
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
@@ -250,7 +254,11 @@ jobs:
       - name: The pinned toolchain
         id: toolchain
         shell: bash
-        run: echo "channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' src/rust-toolchain.toml)
+          if [ -z "$channel" ]; then echo "::error::no channel in src/rust-toolchain.toml"; exit 1; fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (v1), 2026-10-09
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}

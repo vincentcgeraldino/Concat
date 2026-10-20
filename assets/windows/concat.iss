@@ -5,16 +5,21 @@
 ; person double-clicks, and it puts Concat in the Start menu and can take
 ; it out again. Everything it needs is handed in on the command line:
 ;
-;   iscc /DVersion=0.2.8 /DArch=x64compatible /DSuffix=x86_64 ^
+;   iscc /DVersion=0.2.8 /DVersionInfo=0.2.8.0 /DArch=x64compatible /DSuffix=x86_64 ^
 ;        /DStage=C:\...\stage\Concat-0.2.8-windows-x86_64 /DOut=C:\...\stage ^
 ;        assets\windows\concat.iss
 ;
 ; Arch is Inno's own word for the machine: x64compatible for the x86_64
 ; build (which also installs on ARM PCs, under emulation), arm64 for the
 ; native one. Suffix is the bundle's word for it, which names the file.
+; VersionInfo is the version Windows' own fields carry: four numbers and
+; nothing else, which a pre-release suffix is not.
 
 #ifndef Version
   #error Version is required
+#endif
+#ifndef VersionInfo
+  #error VersionInfo is required: the version Windows' own fields carry, as four numbers
 #endif
 #ifndef Arch
   #error Arch is required: x64compatible or arm64
@@ -35,6 +40,10 @@
 AppId={{7B1E5C3A-3B9E-4F0B-9C6D-2F1D0C0A0C47}
 AppName=Concat
 AppVersion={#Version}
+; The version the file's properties carry. Inno Setup reads the version it
+; is given and, finding a suffix it cannot read, writes 0.0.0.0 into the
+; file's properties without saying so. Told the numbers instead.
+VersionInfoVersion={#VersionInfo}
 AppVerName=Concat {#Version}
 AppPublisher=Concat contributors
 AppPublisherURL=https://github.com/jub0t/Concat

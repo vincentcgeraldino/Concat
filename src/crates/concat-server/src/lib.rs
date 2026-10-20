@@ -272,6 +272,16 @@ impl Server {
             let _ = std::fs::remove_file(&path);
             let listener = std::os::unix::net::UnixListener::bind(&path)
                 .map_err(|error| could_not(&shown, &error))?;
+            // The socket file is created with the process's umask, which
+            // is usually 022: every local account could connect to it.
+            // The token is still asked for, but the throttle counts every
+            // Unix-socket caller as one address, so a caller that is
+            // refused there is refused for all of them. Narrowed to the
+            // user, as the discovery file beside it is.
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
             server.socket = Some(path);
             server.listeners.push(
                 json::serve_unix(listener, door.clone())
@@ -538,7 +548,7 @@ pub(crate) mod tests {
             config: scratch.path().join("config"),
             data: scratch.path().join("data"),
         };
-        let path = discovery::path_in(&dirs.config);
+        let path = discovery::path_in(dirs.private());
         let config = Config {
             json: Some("127.0.0.1:0".parse().expect("an address")),
             roots: vec![scratch.path().to_path_buf()],

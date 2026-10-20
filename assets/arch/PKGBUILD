@@ -6,7 +6,13 @@ pkgdesc="Free and open source video editor"
 arch=('x86_64' 'aarch64')
 url="https://github.com/jub0t/Concat"
 license=('AGPL-3.0-or-later')
-depends=('glibc' 'gtk3' 'fontconfig' 'freetype2' 'libxkbcommon' 'mesa' 'alsa-lib')
+# The X11 keyboard library the window opens by name at start, the core
+# library under it, and the xcb extension under that: a machine without
+# them panicked before showing a window. The .deb and the .rpm declare
+# them, and the AppImage carries them beside the binary; this package
+# neither declared nor carried them, and could install cleanly and then
+# fail to open a window.
+depends=('glibc' 'gtk3' 'fontconfig' 'freetype2' 'libxkbcommon' 'libxkbcommon-x11' 'libxcb' 'mesa' 'alsa-lib')
 options=('!strip' '!debug')
 source=()
 

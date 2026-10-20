@@ -456,6 +456,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A package names its own shader, and the loader reads the file the
+    /// manifest names. Reading a fixed name instead refused a package
+    /// that follows its own manifest, with a message saying the shader it
+    /// had named was not there - while it was.
+    #[test]
+    fn a_package_may_name_its_own_shader() {
+        let dir = std::env::temp_dir().join(format!("concat-effects-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let good = dir.join("dave.tint");
+        std::fs::create_dir_all(&good).expect("mkdir");
+        std::fs::write(
+            good.join("effect.toml"),
+            r#"
+            format = 2
+            [effect]
+            id = "dave.tint"
+            name = "Tint"
+            kind = "effect"
+            [wgsl]
+            entry = "tint.wgsl"
+            "#,
+        )
+        .expect("write");
+        std::fs::write(
+            good.join("tint.wgsl"),
+            "fn effect(uv: vec2<f32>) -> vec4<f32> { return sample(uv); }",
+        )
+        .expect("write");
+
+        let mut catalogue = Catalogue::new();
+        let errors: Vec<String> = catalogue
+            .load_dir(&dir)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            catalogue.get("dave.tint").is_some(),
+            "the package is not in the catalogue"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shader's file is beside the manifest, by name: a path would
+    /// reach out of the package.
+    #[test]
+    fn a_shader_may_not_be_named_by_a_path() {
+        let error = Manifest::parse(
+            "[effect]\nid = \"a.b\"\nname = \"B\"\nkind = \"effect\"\n[wgsl]\nentry = \"../../etc/passwd\"\n",
+        )
+        .expect_err("a path is refused");
+        assert!(
+            error.to_string().contains("file name beside the manifest"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_chain_may_only_name_filters_that_touch_the_frame() {
         let with = |chain: &str| {

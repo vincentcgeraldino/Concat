@@ -32,7 +32,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -262,6 +262,14 @@ fn connection<S: Socket>(mut stream: S, door: Door, id: u64, peer: Peer, pending
     let Some((first, rest)) = first_line(&mut stream, deadline) else {
         // Silent, too slow, too long, or gone: the socket closes as it
         // drops, and nothing else was ever held for it.
+        //
+        // It is counted as a failure all the same. A connection that
+        // never presents a token is a connection that did not present a
+        // token, and letting those through unpunished let a flood of
+        // silent sockets fill the pool of places waiting for one - so
+        // that a caller with a token in its hand was refused at the
+        // door, by a process that had not authenticated at all.
+        door.throttle.failed(peer);
         return;
     };
     let (call, outcome) = handshake(&first, &door.token);
@@ -445,11 +453,23 @@ impl Outbox {
     }
 
     /// Queues one line. False once the caller is gone.
+    ///
+    /// A queue that is merely full is not that: the caller is slow, not
+    /// gone. Saying otherwise had the hub read a slow caller as one that
+    /// had left, and unsubscribe it - so a client that stopped reading
+    /// for a moment was dropped from the event stream for good, and
+    /// never heard how the job it was waiting on ended.
     fn send(&self, message: Message) -> bool {
         match self.queue.lock() {
-            Ok(queue) => queue
-                .as_ref()
-                .is_some_and(|queue| queue.try_send(message).is_ok()),
+            Ok(queue) => queue.as_ref().is_some_and(|queue| {
+                match queue.try_send(message) {
+                    Ok(()) => true,
+                    // Full: the caller is behind, not away.
+                    Err(TrySendError::Full(_)) => true,
+                    // Gone: the writer hung up and took the queue with it.
+                    Err(TrySendError::Disconnected(_)) => false,
+                }
+            }),
             Err(_) => false,
         }
     }

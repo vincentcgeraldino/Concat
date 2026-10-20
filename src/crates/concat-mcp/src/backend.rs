@@ -107,7 +107,7 @@ fn locate() -> Result<(SocketAddr, String), String> {
         return Err("CONCAT_API_ADDRESS and CONCAT_API_TOKEN go together".to_owned());
     }
     let dirs = AppDirs::locate()?;
-    let path = discovery::path_in(&dirs.config);
+    let path = discovery::path_in(dirs.private());
     match discovery::read(&path)? {
         Some(listing) => Ok((listing.address, listing.token)),
         None => Err(
@@ -143,10 +143,15 @@ impl Window {
 impl Backend for Window {
     fn call(&mut self, request: Request) -> Result<Value, ApiError> {
         match self.client.call(&request) {
+            // The call never reached the server, so it is safe to make it
+            // again. A call that *was* sent and whose answer was lost is
+            // not: the server may have done it, and doing it twice is how
+            // a title ends up on the timeline twice. That failure says so,
+            // and it is passed on rather than papered over.
             Err(error)
-                if error
-                    .message
-                    .starts_with("the connection to the Concat server") =>
+                if error.message.starts_with(
+                    "the connection to the Concat server failed before the call was sent",
+                ) =>
             {
                 let again = Window::find().map_err(|why| {
                     ApiError::failed(format!(

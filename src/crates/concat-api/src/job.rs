@@ -119,16 +119,22 @@ impl Book {
     }
 
     /// A job's thread ended without saying how - a panic in the render.
-    /// Recorded as failed so a caller asking is not told "running" forever.
-    pub(crate) fn abandon(&self, job: &str) {
-        let running = self.inner().states.contains_key(job);
-        if running {
-            self.record(&Event::ExportFailed {
-                job: job.to_owned(),
-                path: String::new(),
-                error: ApiError::failed("the job ended without a result"),
-            });
-        }
+    /// Recorded as failed so a caller asking is not told "running" forever,
+    /// and the event handed back so the subscribers are told as well: a
+    /// caller that listens for events and never hears one would wait for
+    /// ever, and the book and the stream must not disagree.
+    pub(crate) fn abandon(&self, job: &str) -> Option<Event> {
+        let path = {
+            let inner = self.inner();
+            inner.states.get(job)?.path.clone()
+        };
+        let event = Event::ExportFailed {
+            job: job.to_owned(),
+            path,
+            error: ApiError::failed("the job ended without a result"),
+        };
+        self.record(&event);
+        Some(event)
     }
 
     /// The state of `job`, running or finished.
@@ -220,5 +226,32 @@ mod tests {
         }
         assert!(book.status("j0").is_none(), "the oldest is forgotten");
         assert!(book.status(&format!("j{FINISHED_KEPT}")).is_some());
+    }
+
+    /// A job whose thread ended without saying how is booked as failed,
+    /// and the event is handed back so the subscribers are told as well:
+    /// a caller that only listens for events would otherwise wait for
+    /// ever for one that never comes. The event names the project the
+    /// job was working on, which the book already knew.
+    #[test]
+    fn a_job_that_vanished_hands_back_the_event_that_says_so() {
+        let book = Book::default();
+        begun(&book, "j1");
+        let event = book.abandon("j1").expect("the job was running");
+        assert_eq!(event.job(), "j1");
+        match &event {
+            Event::ExportFailed { path, error, .. } => {
+                assert_eq!(path, "/p");
+                assert_eq!(error.code, ErrorCode::Failed);
+            }
+            other => panic!("failed with {other:?}"),
+        }
+        // And the book says the same, so a caller asking and a caller
+        // listening cannot disagree.
+        let status = book.status("j1").expect("known");
+        assert_eq!(status.state, JobState::Failed);
+        assert_eq!(status.path, "/p");
+        // A job that is not running has nothing to abandon.
+        assert!(book.abandon("j9").is_none());
     }
 }
